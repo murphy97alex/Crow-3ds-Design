@@ -39,8 +39,22 @@ Stylus in right hand, frequent actions on left.
 - GitHub Actions builds; releases installed via FBI QR
 - PNG exports pulled off SD with ftpd
 
+## Decisions (2026-11-07)
+- **v1 tools:** pencil, eraser, flood fill; line, rectangle, ellipse (outline or filled);
+  rectangle select + move, copy/paste, flip/rotate 90° (also the basis for stamps);
+  mirror drawing (horizontal/vertical symmetry). Eyedropper stays on hold-R.
+- **Buttons:** use the draft layout above for v1; left-handed mirror in Settings.
+- **Colors:** per-project palette, up to 32 slots. Slots are edited with a hex entry
+  and an RGB color wheel. Pixels store a palette index, so editing a slot recolors the art.
+  PNG export is full color.
+- **Crow display:** unknown for now. Design for full color; display-specific export later.
+- **Project file:** custom binary `.pxd`, one file per project: versioned header, canvas size,
+  palette, then a list of frames (compressed indexed pixels). Room to add layers later.
+  PNG export is separate.
+
 ## Open questions
-- v1 tool list, button mapping, palette (fixed vs free), file format details
+- Default starting palette (needs an open-licensed choice)
+- `.pxd` details (compression, where saves live on SD) — Claude decides, documents in docs/
 
 ## Later
 - Layers, export sized for Crow's display, send sprites to a Pi over Wi-Fi
