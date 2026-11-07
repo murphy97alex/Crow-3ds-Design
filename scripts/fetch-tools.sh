@@ -14,15 +14,15 @@ api() {
   curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" "$1"
 }
 
-# fetch_tool <binary-name> <repo> [<repo> ...]
+# fetch_tool <binary-name> <asset-url-regex> <repo> [<repo> ...]
 fetch_tool() {
-  local name="$1"; shift
+  local name="$1" pattern="$2"; shift 2
   for repo in "$@"; do
     echo "::group::Looking for $name in $repo"
     local urls
-    urls="$(api "https://api.github.com/repos/$repo/releases?per_page=5" \
+    urls="$(api "https://api.github.com/repos/$repo/releases?per_page=30" \
       | jq -r '.[].assets[].browser_download_url' 2>/dev/null \
-      | grep -Ei '\.zip$' | grep -Eiv 'win|mac|osx|darwin|arm64|aarch64' || true)"
+      | grep -Ei '\.zip$' | grep -Ei "$pattern" | grep -Eiv 'win|mac|osx|darwin|arm64|aarch64' || true)"
     echo "$urls"
     for url in $urls; do
       local d="$WORK/$name-$RANDOM"
@@ -46,7 +46,8 @@ fetch_tool() {
   return 1
 }
 
-fetch_tool makerom    3DSGuy/Project_CTR
-fetch_tool bannertool Epicpkmn11/bannertool diasurgical/bannertool Steveice10/bannertool
+# makerom >= 0.19.0 Linux builds need glibc 2.38; the devkitPro image (Debian) has 2.36.
+fetch_tool makerom    'makerom-v0\.18\.4-ubuntu' 3DSGuy/Project_CTR
+fetch_tool bannertool 'bannertool' Epicpkmn11/bannertool diasurgical/bannertool Steveice10/bannertool
 
 ls -la "$DEST"
