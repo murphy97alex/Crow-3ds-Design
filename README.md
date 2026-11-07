@@ -21,9 +21,13 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 Projects are saved to `/3ds/pixel-ui-designer/projects/*.pxd` ([format](docs/PXD.md)).
 
 ## Install
-Grab `pixel-ui-designer.cia` from the latest
-[release](../../releases/latest) and scan its download URL with FBI's
-*Remote Install → Scan QR Code*. Or copy the `.3dsx` to `/3ds/` on the SD
+In FBI: *Remote Install → Scan QR Code*, then scan this. It always points at the
+newest release's `.cia`.
+
+![Install QR](docs/install-qr.png)
+
+Link: https://github.com/murphy97alex/Crow-3ds-Design/releases/latest/download/pixel-ui-designer.cia
+ Or copy the `.3dsx` to `/3ds/` on the SD
 card and launch it from the Homebrew Launcher.
 
 ## Build
