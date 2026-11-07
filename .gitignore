@@ -1,0 +1,25 @@
+# devkitPro / 3DS build output
+build/
+*.3dsx
+*.cia
+*.elf
+*.smdh
+*.bnr
+*.icn
+*.map
+*.lst
+*.o
+*.d
+*.t3x
+*_shbin.h
+*.shbin
+
+# Build tools fetched by CI or locally
+tools/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
