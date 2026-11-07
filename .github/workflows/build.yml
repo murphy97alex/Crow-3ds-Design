@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Create this tag (e.g. v0.0.1) on the selected commit and publish a release"
+        required: false
+        default: ""
 
 permissions:
   contents: write # needed to publish releases on tags
@@ -47,9 +52,11 @@ jobs:
           path: dist/*
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release_tag, 'v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             dist/pixel-ui-designer.3dsx
             dist/pixel-ui-designer.cia
