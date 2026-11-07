@@ -1,53 +1,160 @@
-// 3DS Pixel UI Designer — Milestone 0
-// Top screen: app name. Bottom screen: draw black pixels with the stylus.
+// 3DS Pixel UI Designer
 // SPDX-License-Identifier: MIT
 
 #include <3ds.h>
 #include <citro2d.h>
+#include <dirent.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+#include "color.h"
+#include "doc.h"
+#include "gfx.h"
+#include "picker.h"
+#include "pxd.h"
 
 #define APP_NAME "Pixel UI Designer"
+#define SAVE_ROOT "sdmc:/3ds/pixel-ui-designer"
+#define SAVE_DIR SAVE_ROOT "/projects"
 
-#define BOTTOM_W 320
-#define BOTTOM_H 240
-#define TEX_W 512 // power-of-two texture that holds the 320x240 canvas
-#define TEX_H 256
+// Bottom screen layout
+#define BOT_W 320
+#define BOT_H 240
+#define SW_COLS 16
+#define SW_W 20
+#define SW_H 11
+#define STRIP_H (SW_H * 2)  // palette strip at the top of the bottom screen
+#define VIEW_Y STRIP_H
+#define VIEW_H (BOT_H - VIEW_Y)
 
-#define COLOR_WHITE 0xFFFFFFFFu // RGBA8: 0xRRGGBBAA
-#define COLOR_BLACK 0x000000FFu
+#define COL(r, g, b) C2D_Color32(r, g, b, 255)
+#define C_BG_TOP   COL(0x20, 0x22, 0x28)
+#define C_BG_BOT   COL(0x30, 0x32, 0x3A)
+#define C_PANEL    COL(0x2C, 0x2F, 0x38)
+#define C_TEXT     COL(0xF0, 0xF0, 0xF0)
+#define C_DIM      COL(0xA0, 0xA4, 0xB0)
+#define C_ACCENT   COL(0xFF, 0xAA, 0x28)
+#define C_SEL      COL(0x44, 0x4A, 0x5C)
 
-static C3D_Tex canvasTex;
-static Tex3DS_SubTexture canvasSub;
-static C2D_Image canvasImg;
-static bool canvasDirty = false;
+// ---- tools -----------------------------------------------------------------
 
-// Offset of pixel (x, y) inside a tiled (8x8 Morton order) GPU texture.
-static inline u32 tiledOffset(u32 x, u32 y, u32 w)
+typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
+static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Eyedropper" };
+
+// ---- app state ---------------------------------------------------------------
+
+typedef enum { MODE_DRAW, MODE_MENU, MODE_NEW, MODE_OPEN, MODE_CONFIRM, MODE_PICKER } Mode;
+typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE } Action;
+
+static Doc doc;
+static Mode mode = MODE_DRAW;
+static Tool tool = TOOL_PENCIL, lastTool = TOOL_ERASER;
+static int color = 0;          // current palette slot
+static int zoomIdx;
+static float viewX, viewY;     // canvas coords at the view's top-left corner
+static bool gridOn = true;
+static bool previewMode = false;
+static bool running = true;
+
+static const int ZOOMS[] = { 1, 2, 3, 4, 6, 8, 12, 16, 24 };
+#define ZOOM_COUNT (int)(sizeof(ZOOMS) / sizeof(ZOOMS[0]))
+
+// touch / stroke
+enum { TOUCH_NONE, TOUCH_CANVAS, TOUCH_STRIP };
+static int touchTarget = TOUCH_NONE;
+static int lastCX, lastCY;
+static bool strokeChanged;
+
+// menus
+static int menuSel, newSel, openSel, openCount;
+static char openFiles[128][DOC_NAME_MAX + 8];
+static Action confirmAction;
+static char confirmMsg[96];
+static int pendingNewW, pendingNewH;
+static char pendingName[DOC_NAME_MAX];
+
+static char status[96];
+static int statusTimer;
+
+static void set_status(const char* msg)
 {
-	u32 tile = ((y >> 3) * (w >> 3) + (x >> 3)) << 6;
-	u32 morton = (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) |
-	             ((x & 4) << 2) | ((y & 4) << 3);
-	return tile + morton;
+	snprintf(status, sizeof(status), "%s", msg);
+	statusTimer = 180;
 }
 
-static void canvasPlot(int x, int y, u32 color)
+// ---- view --------------------------------------------------------------------
+
+static int zoom(void) { return ZOOMS[zoomIdx]; }
+
+static void view_clamp(void)
 {
-	if (x < 0 || y < 0 || x >= BOTTOM_W || y >= BOTTOM_H)
+	float z = zoom();
+	float cx = viewX + BOT_W / 2.0f / z, cy = viewY + VIEW_H / 2.0f / z;
+	if (cx < 0) viewX -= cx;
+	if (cy < 0) viewY -= cy;
+	if (cx > doc.w) viewX -= cx - doc.w;
+	if (cy > doc.h) viewY -= cy - doc.h;
+}
+
+static void view_fit(void)
+{
+	zoomIdx = 0;
+	for (int i = ZOOM_COUNT - 1; i >= 0; i--)
+		if (doc.w * ZOOMS[i] <= BOT_W && doc.h * ZOOMS[i] <= VIEW_H)
+		{
+			zoomIdx = i;
+			break;
+		}
+	viewX = (doc.w - BOT_W / (float)zoom()) / 2.0f;
+	viewY = (doc.h - VIEW_H / (float)zoom()) / 2.0f;
+}
+
+static void view_zoom(int dir)
+{
+	int ni = zoomIdx + dir;
+	if (ni < 0 || ni >= ZOOM_COUNT)
 		return;
-	((u32*)canvasTex.data)[tiledOffset(x, y, TEX_W)] = color;
-	canvasDirty = true;
+	float cx = viewX + BOT_W / 2.0f / zoom(), cy = viewY + VIEW_H / 2.0f / zoom();
+	zoomIdx = ni;
+	viewX = cx - BOT_W / 2.0f / zoom();
+	viewY = cy - VIEW_H / 2.0f / zoom();
+	view_clamp();
 }
 
-// Bresenham line so fast strokes don't leave gaps.
-static void canvasLine(int x0, int y0, int x1, int y1, u32 color)
+// Screen position of the canvas' top-left corner, rounded so pixels stay crisp.
+static float canvas_sx(void) { return floorf(-viewX * zoom() + 0.5f); }
+static float canvas_sy(void) { return floorf(VIEW_Y - viewY * zoom() + 0.5f); }
+
+static void screen_to_canvas(int sx, int sy, int* cx, int* cy)
+{
+	*cx = (int)floorf((sx - canvas_sx()) / zoom());
+	*cy = (int)floorf((sy - canvas_sy()) / zoom());
+}
+
+// ---- editing -------------------------------------------------------------------
+
+static void plot(int x, int y, uint8_t v)
+{
+	if (x < 0 || y < 0 || x >= doc.w || y >= doc.h)
+		return;
+	uint8_t* p = &doc_pixels(&doc)[y * doc.w + x];
+	if (*p == v)
+		return;
+	*p = v;
+	gfx_canvas_set(&doc, x, y);
+	strokeChanged = true;
+}
+
+static void line(int x0, int y0, int x1, int y1, uint8_t v)
 {
 	int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
 	int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
 	int err = dx + dy;
 	for (;;)
 	{
-		canvasPlot(x0, y0, color);
+		plot(x0, y0, v);
 		if (x0 == x1 && y0 == y1)
 			break;
 		int e2 = 2 * err;
@@ -56,113 +163,642 @@ static void canvasLine(int x0, int y0, int x1, int y1, u32 color)
 	}
 }
 
-static void canvasClear(u32 color)
+static void set_tool(Tool t)
 {
-	u32* px = (u32*)canvasTex.data;
-	for (u32 i = 0; i < TEX_W * TEX_H; i++)
-		px[i] = color;
-	canvasDirty = true;
+	if (t == tool)
+		return;
+	lastTool = tool;
+	tool = t;
 }
 
-static bool canvasInit(void)
+static void eyedrop(int cx, int cy)
 {
-	if (!C3D_TexInit(&canvasTex, TEX_W, TEX_H, GPU_RGBA8))
+	if (cx < 0 || cy < 0 || cx >= doc.w || cy >= doc.h)
+		return;
+	uint8_t v = doc_get(&doc, cx, cy);
+	if (v != PIX_TRANSPARENT)
+		color = v - 1;
+}
+
+static void after_doc_change(void)
+{
+	gfx_canvas_rebuild(&doc);
+}
+
+// ---- files ---------------------------------------------------------------------
+
+static void ensure_dirs(void)
+{
+	mkdir("sdmc:/3ds", 0777);
+	mkdir(SAVE_ROOT, 0777);
+	mkdir(SAVE_DIR, 0777);
+}
+
+static void project_path(char* out, size_t n, const char* name)
+{
+	snprintf(out, n, SAVE_DIR "/%s.pxd", name);
+}
+
+static bool file_exists(const char* path)
+{
+	struct stat st;
+	return stat(path, &st) == 0;
+}
+
+static void save_as_name(const char* name)
+{
+	ensure_dirs();
+	char path[160];
+	project_path(path, sizeof(path), name);
+	const char* err = pxd_save(&doc, path);
+	if (err)
+	{
+		char msg[96];
+		snprintf(msg, sizeof(msg), "Save failed: %s", err);
+		set_status(msg);
+		return;
+	}
+	snprintf(doc.name, sizeof(doc.name), "%s", name);
+	doc.dirty = false;
+	char msg[96];
+	snprintf(msg, sizeof(msg), "Saved %s.pxd", name);
+	set_status(msg);
+}
+
+static void confirm(Action a, const char* msg)
+{
+	confirmAction = a;
+	snprintf(confirmMsg, sizeof(confirmMsg), "%s", msg);
+	mode = MODE_CONFIRM;
+}
+
+// Returns false if cancelled.
+static bool ask_name(char* out, size_t n)
+{
+	SwkbdState kb;
+	char buf[DOC_NAME_MAX] = {0};
+	swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, DOC_NAME_MAX - 1);
+	swkbdSetHintText(&kb, "Project name");
+	swkbdSetInitialText(&kb, doc.name[0] ? doc.name : "untitled");
+	swkbdSetValidation(&kb, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+	if (swkbdInputText(&kb, buf, sizeof(buf)) != SWKBD_BUTTON_CONFIRM)
 		return false;
-	C3D_TexSetFilter(&canvasTex, GPU_NEAREST, GPU_NEAREST);
-	C3D_TexSetWrap(&canvasTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-
-	canvasSub.width = BOTTOM_W;
-	canvasSub.height = BOTTOM_H;
-	canvasSub.left = 0.0f;
-	canvasSub.top = 1.0f;
-	canvasSub.right = (float)BOTTOM_W / TEX_W;
-	canvasSub.bottom = 1.0f - (float)BOTTOM_H / TEX_H;
-
-	canvasImg.tex = &canvasTex;
-	canvasImg.subtex = &canvasSub;
-
-	canvasClear(COLOR_WHITE);
-	return true;
+	// keep file names simple and portable
+	size_t j = 0;
+	for (size_t i = 0; buf[i] && j < n - 1; i++)
+	{
+		char c = buf[i];
+		bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+		out[j++] = ok ? c : (c == ' ' ? '_' : 0);
+		if (!out[j - 1]) j--;
+	}
+	out[j] = '\0';
+	return j > 0;
 }
+
+static void save_as(void)
+{
+	if (!ask_name(pendingName, sizeof(pendingName)))
+		return;
+	char path[160];
+	project_path(path, sizeof(path), pendingName);
+	if (file_exists(path) && strcmp(pendingName, doc.name) != 0)
+	{
+		char msg[96];
+		snprintf(msg, sizeof(msg), "Overwrite %s.pxd?", pendingName);
+		confirm(ACT_OVERWRITE, msg);
+		return;
+	}
+	save_as_name(pendingName);
+	mode = MODE_DRAW;
+}
+
+static void scan_projects(void)
+{
+	openCount = 0;
+	DIR* dir = opendir(SAVE_DIR);
+	if (!dir)
+		return;
+	struct dirent* e;
+	while ((e = readdir(dir)) && openCount < 128)
+	{
+		size_t n = strlen(e->d_name);
+		if (n > 4 && n - 4 < DOC_NAME_MAX && !strcasecmp(e->d_name + n - 4, ".pxd"))
+		{
+			memcpy(openFiles[openCount], e->d_name, n - 4);
+			openFiles[openCount][n - 4] = '\0';
+			openCount++;
+		}
+	}
+	closedir(dir);
+	qsort(openFiles, openCount, sizeof(openFiles[0]), (int (*)(const void*, const void*))strcasecmp);
+}
+
+static void open_project(const char* name)
+{
+	char path[160];
+	project_path(path, sizeof(path), name);
+	const char* err = pxd_load(&doc, path);
+	if (err)
+	{
+		char msg[96];
+		snprintf(msg, sizeof(msg), "Open failed: %s", err);
+		set_status(msg);
+		return;
+	}
+	snprintf(doc.name, sizeof(doc.name), "%s", name);
+	view_fit();
+	after_doc_change();
+	set_status("Opened");
+}
+
+static void new_canvas(int w, int h)
+{
+	if (!doc_new(&doc, w, h))
+	{
+		set_status("Couldn't create canvas");
+		return;
+	}
+	color = 0;
+	view_fit();
+	after_doc_change();
+}
+
+static void run_action(Action a)
+{
+	mode = MODE_DRAW;
+	switch (a)
+	{
+	case ACT_NEW: new_canvas(pendingNewW, pendingNewH); break;
+	case ACT_OPEN: open_project(openFiles[openSel]); break;
+	case ACT_EXIT: running = false; break;
+	case ACT_OVERWRITE: save_as_name(pendingName); break;
+	default: break;
+	}
+}
+
+// ---- menus ---------------------------------------------------------------------
+
+static const char* MENU_ITEMS[] = { "Back to canvas", "New canvas", "Save", "Save as...", "Open...", "Exit" };
+#define MENU_COUNT 6
+
+typedef struct { const char* label; int w, h; } Preset;
+static const Preset PRESETS[] = {
+	{ "16 x 16", 16, 16 }, { "32 x 32", 32, 32 }, { "64 x 64", 64, 64 }, { "128 x 64", 128, 64 },
+	{ "128 x 128", 128, 128 }, { "240 x 240", 240, 240 }, { "320 x 240", 320, 240 }, { "Custom...", 0, 0 },
+};
+#define PRESET_COUNT 8
+
+static int ask_number(const char* hint, int def, int max)
+{
+	SwkbdState kb;
+	char buf[8] = {0}, init[8];
+	snprintf(init, sizeof(init), "%d", def);
+	swkbdInit(&kb, SWKBD_TYPE_NUMPAD, 2, 3);
+	swkbdSetHintText(&kb, hint);
+	swkbdSetInitialText(&kb, init);
+	swkbdSetValidation(&kb, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+	if (swkbdInputText(&kb, buf, sizeof(buf)) != SWKBD_BUTTON_CONFIRM)
+		return 0;
+	int v = atoi(buf);
+	return v < 1 ? 0 : v > max ? max : v;
+}
+
+static void request_new(int w, int h)
+{
+	pendingNewW = w;
+	pendingNewH = h;
+	if (doc.dirty)
+		confirm(ACT_NEW, "Discard unsaved changes?");
+	else
+		run_action(ACT_NEW);
+}
+
+static void list_nav(u32 kDown, int* sel, int count)
+{
+	if (count <= 0)
+		return;
+	if (kDown & KEY_DUP) *sel = (*sel + count - 1) % count;
+	if (kDown & KEY_DDOWN) *sel = (*sel + 1) % count;
+}
+
+static void update_menus(u32 kDown)
+{
+	switch (mode)
+	{
+	case MODE_MENU:
+		list_nav(kDown, &menuSel, MENU_COUNT);
+		if (kDown & (KEY_B | KEY_START)) mode = MODE_DRAW;
+		if (kDown & KEY_A)
+		{
+			switch (menuSel)
+			{
+			case 0: mode = MODE_DRAW; break;
+			case 1: mode = MODE_NEW; break;
+			case 2:
+				if (doc.name[0]) { save_as_name(doc.name); mode = MODE_DRAW; }
+				else save_as();
+				break;
+			case 3: save_as(); break;
+			case 4: scan_projects(); openSel = 0; mode = MODE_OPEN; break;
+			case 5:
+				if (doc.dirty) confirm(ACT_EXIT, "Exit without saving?");
+				else running = false;
+				break;
+			}
+		}
+		break;
+	case MODE_NEW:
+		list_nav(kDown, &newSel, PRESET_COUNT);
+		if (kDown & KEY_B) mode = MODE_MENU;
+		if (kDown & KEY_A)
+		{
+			const Preset* p = &PRESETS[newSel];
+			if (p->w)
+				request_new(p->w, p->h);
+			else
+			{
+				int w = ask_number("Width (1-320)", doc.w, DOC_MAX_W);
+				int h = w ? ask_number("Height (1-240)", doc.h, DOC_MAX_H) : 0;
+				if (w && h)
+					request_new(w, h);
+			}
+		}
+		break;
+	case MODE_OPEN:
+		list_nav(kDown, &openSel, openCount);
+		if (kDown & KEY_B) mode = MODE_MENU;
+		if ((kDown & KEY_A) && openCount > 0)
+		{
+			if (doc.dirty) confirm(ACT_OPEN, "Discard unsaved changes?");
+			else run_action(ACT_OPEN);
+		}
+		break;
+	case MODE_CONFIRM:
+		if (kDown & KEY_A) run_action(confirmAction);
+		else if (kDown & KEY_B) mode = MODE_MENU;
+		break;
+	default:
+		break;
+	}
+}
+
+// ---- draw mode input -------------------------------------------------------------
+
+static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
+{
+	if (kDown & KEY_START) { mode = MODE_MENU; menuSel = 0; return; }
+	if (kDown & KEY_SELECT) previewMode = !previewMode;
+	if (kDown & KEY_X) gridOn = !gridOn;
+	if (kDown & KEY_Y) set_tool(lastTool);
+	if (kDown & KEY_DLEFT) set_tool((tool + TOOL_COUNT - 1) % TOOL_COUNT);
+	if (kDown & KEY_DRIGHT) set_tool((tool + 1) % TOOL_COUNT);
+	if (kDown & KEY_DUP) view_zoom(+1);
+	if (kDown & KEY_DDOWN) view_zoom(-1);
+
+	if (touchTarget == TOUCH_NONE)
+	{
+		if ((kDown & KEY_L) && hist_undo(&doc)) after_doc_change();
+		if ((kDown & KEY_ZL) && hist_redo(&doc)) after_doc_change();
+	}
+
+	circlePosition cp;
+	hidCircleRead(&cp);
+	if (abs(cp.dx) > 16 || abs(cp.dy) > 16)
+	{
+		const float speed = 5.0f / 156.0f;
+		viewX += cp.dx * speed / zoom();
+		viewY -= cp.dy * speed / zoom();
+		view_clamp();
+	}
+
+	bool dropper = (kHeld & KEY_R) || tool == TOOL_EYEDROPPER;
+
+	if (kDown & KEY_TOUCH)
+	{
+		if (touch.py < STRIP_H)
+		{
+			touchTarget = TOUCH_STRIP;
+			int slot = (touch.py / SW_H) * SW_COLS + touch.px / SW_W;
+			if (slot >= 0 && slot < DOC_PALETTE_SIZE)
+			{
+				if (slot == color)
+				{
+					picker_open(slot, doc.palette[slot]);
+					mode = MODE_PICKER;
+					touchTarget = TOUCH_NONE;
+					return;
+				}
+				color = slot;
+				if (tool == TOOL_ERASER || tool == TOOL_EYEDROPPER)
+					set_tool(TOOL_PENCIL);
+			}
+		}
+		else
+		{
+			touchTarget = TOUCH_CANVAS;
+			screen_to_canvas(touch.px, touch.py, &lastCX, &lastCY);
+			if (dropper)
+				eyedrop(lastCX, lastCY);
+			else
+			{
+				hist_begin(&doc);
+				strokeChanged = false;
+				plot(lastCX, lastCY, tool == TOOL_ERASER ? PIX_TRANSPARENT : color + 1);
+			}
+		}
+	}
+	else if ((kHeld & KEY_TOUCH) && touchTarget == TOUCH_CANVAS)
+	{
+		int cx, cy;
+		screen_to_canvas(touch.px, touch.py, &cx, &cy);
+		if (dropper)
+			eyedrop(cx, cy);
+		else
+			line(lastCX, lastCY, cx, cy, tool == TOOL_ERASER ? PIX_TRANSPARENT : color + 1);
+		lastCX = cx;
+		lastCY = cy;
+	}
+
+	if ((kUp & KEY_TOUCH) || !(kHeld & KEY_TOUCH))
+	{
+		if (touchTarget == TOUCH_CANVAS)
+		{
+			if (strokeChanged)
+			{
+				hist_commit();
+				doc.dirty = true;
+			}
+			else
+				hist_abort();
+			strokeChanged = false;
+			// one-shot eyedropper tool returns to the previous tool
+			if (tool == TOOL_EYEDROPPER && !(kHeld & KEY_R))
+				set_tool(lastTool);
+		}
+		touchTarget = TOUCH_NONE;
+	}
+}
+
+// ---- rendering --------------------------------------------------------------------
+
+static void draw_bottom(void)
+{
+	if (mode == MODE_PICKER)
+	{
+		picker_draw();
+		return;
+	}
+
+	float z = zoom(), sx = canvas_sx(), sy = canvas_sy();
+	gfx_draw_canvas(&doc, sx, sy, z, VIEW_Y, BOT_H);
+
+	if (gridOn && z >= 4)
+	{
+		u32 gc = C2D_Color32(0, 0, 0, 0x50);
+		int x0 = viewX < 0 ? 0 : (int)viewX, x1 = (int)(viewX + BOT_W / z) + 1;
+		int y0 = viewY < 0 ? 0 : (int)viewY, y1 = (int)(viewY + VIEW_H / z) + 1;
+		if (x1 > doc.w) x1 = doc.w;
+		if (y1 > doc.h) y1 = doc.h;
+		float top = sy < VIEW_Y ? VIEW_Y : sy, bot = sy + doc.h * z > BOT_H ? BOT_H : sy + doc.h * z;
+		float left = sx < 0 ? 0 : sx, right = sx + doc.w * z > BOT_W ? BOT_W : sx + doc.w * z;
+		for (int x = x0 + 1; x < x1; x++)
+			C2D_DrawRectSolid(sx + x * z, top, 0.5f, 1, bot - top, gc);
+		for (int y = y0 + 1; y < y1; y++)
+		{
+			float ly = sy + y * z;
+			if (ly >= VIEW_Y)
+				C2D_DrawRectSolid(left, ly, 0.5f, right - left, 1, gc);
+		}
+	}
+	// canvas border
+	u32 bc = C2D_Color32(0x80, 0x84, 0x90, 255);
+	float bx = sx - 1, by = sy - 1, bw = doc.w * z + 2, bh = doc.h * z + 2;
+	if (by >= VIEW_Y) C2D_DrawRectSolid(bx, by, 0.5f, bw, 1, bc);
+	if (by + bh - 1 >= VIEW_Y) C2D_DrawRectSolid(bx, by + bh - 1, 0.5f, bw, 1, bc);
+	float vy0 = by < VIEW_Y ? VIEW_Y : by, vy1 = by + bh;
+	if (vy1 > vy0)
+	{
+		C2D_DrawRectSolid(bx, vy0, 0.5f, 1, vy1 - vy0, bc);
+		C2D_DrawRectSolid(bx + bw - 1, vy0, 0.5f, 1, vy1 - vy0, bc);
+	}
+
+	// palette strip
+	C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, STRIP_H, C_PANEL);
+	for (int i = 0; i < DOC_PALETTE_SIZE; i++)
+	{
+		float x = (i % SW_COLS) * SW_W, y = (i / SW_COLS) * SW_H;
+		C2D_DrawRectSolid(x + 1, y + 1, 0.5f, SW_W - 2, SW_H - 2, rgba_to_c2d(doc.palette[i]));
+	}
+	float hx = (color % SW_COLS) * SW_W, hy = (color / SW_COLS) * SW_H;
+	gfx_rect_outline(hx, hy, SW_W, SW_H, 2, C2D_Color32(0, 0, 0, 255));
+	gfx_rect_outline(hx + 1, hy + 1, SW_W - 2, SW_H - 2, 1, C2D_Color32(255, 255, 255, 255));
+
+	if (mode != MODE_DRAW)
+		C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, BOT_H, C2D_Color32(0, 0, 0, 0x90));
+}
+
+// Draws the canvas into a box at the largest scale <= 1:1 that fits, centered.
+static void draw_preview_box(float x, float y, float w, float h)
+{
+	float s = 1.0f;
+	while (doc.w * s > w || doc.h * s > h)
+		s /= 2;
+	float px = floorf(x + (w - doc.w * s) / 2), py = floorf(y + (h - doc.h * s) / 2);
+	gfx_draw_canvas(&doc, px, py, s, 0, 240);
+	if (s < 1.0f)
+		gfx_text(x + 4, y + h - 14, 0.4f, C_DIM, "1:%d", (int)(1 / s));
+}
+
+static void draw_top_tools(void)
+{
+	// title bar
+	C2D_DrawRectSolid(0, 0, 0.5f, 400, 22, C_PANEL);
+	gfx_text(8, 3, 0.55f, C_TEXT, APP_NAME);
+	char name[80];
+	snprintf(name, sizeof(name), "%s%s", doc.name[0] ? doc.name : "untitled", doc.dirty ? " *" : "");
+	gfx_text(392 - gfx_text_width(0.5f, name), 4, 0.5f, C_DIM, "%s", name);
+
+	// tool list
+	gfx_text(10, 30, 0.45f, C_DIM, "TOOLS  (D-pad < >)");
+	for (int i = 0; i < TOOL_COUNT; i++)
+	{
+		float y = 46 + i * 20;
+		if (i == tool)
+			C2D_DrawRectSolid(8, y - 2, 0.5f, 176, 19, C_SEL);
+		gfx_text(16, y, 0.55f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
+	}
+
+	// color
+	float cy = 46 + TOOL_COUNT * 20 + 8;
+	gfx_text(10, cy, 0.45f, C_DIM, "COLOR");
+	C2D_DrawRectSolid(10, cy + 16, 0.5f, 26, 26, C_TEXT);
+	C2D_DrawRectSolid(11, cy + 17, 0.5f, 24, 24, rgba_to_c2d(doc.palette[color]));
+	gfx_text(44, cy + 16, 0.5f, C_TEXT, "Slot %d", color + 1);
+	gfx_text(44, cy + 30, 0.5f, C_TEXT, "#%06lX", (unsigned long)(doc.palette[color] >> 8));
+
+	// info
+	float iy = cy + 52;
+	gfx_text(10, iy, 0.45f, C_DIM, "Canvas %dx%d   Zoom %dx", doc.w, doc.h, zoom());
+	gfx_text(10, iy + 14, 0.45f, C_DIM, "Frame %d/%d   Grid %s", doc.curFrame + 1, doc.frameCount, gridOn ? "on" : "off");
+
+	// true-size preview
+	C2D_DrawRectSolid(196, 28, 0.5f, 198, 180, C_BG_BOT);
+	draw_preview_box(197, 29, 196, 178);
+
+	// footer
+	if (statusTimer > 0)
+		gfx_text(10, 220, 0.5f, C_ACCENT, "%s", status);
+	else if (mode == MODE_PICKER)
+		gfx_text(10, 220, 0.45f, C_DIM, "Pick a color below.  A: OK   B: cancel");
+	else
+		gfx_text(10, 214, 0.42f, C_DIM, "L undo  ZL redo  hold R eyedropper  X grid  Y last tool\n"
+		                                 "Circle pad pan  Up/Down zoom  SELECT preview  START menu");
+}
+
+static void draw_top_preview(void)
+{
+	// show the canvas at 1x, 2x, 3x... side by side, as many as fit
+	float gap = 12, total = 0;
+	int n = 0;
+	for (int s = 1; s <= 4; s++)
+	{
+		if (doc.h * s > 210 || total + doc.w * s + (n ? gap : 0) > 384)
+			break;
+		total += doc.w * s + (n ? gap : 0);
+		n++;
+	}
+	if (n == 0)
+	{
+		draw_preview_box(0, 0, 400, 240);
+		return;
+	}
+	float x = floorf((400 - total) / 2);
+	for (int s = 1; s <= n; s++)
+	{
+		float y = floorf((226 - doc.h * s) / 2);
+		gfx_draw_canvas(&doc, x, y, s, 0, 240);
+		gfx_text(x, y + doc.h * s + 2, 0.4f, C_DIM, "%dx", s);
+		x += doc.w * s + gap;
+	}
+	gfx_text(8, 224, 0.42f, C_DIM, "Preview   SELECT: back to tools");
+}
+
+static void draw_list(const char* title, const char* const* items, int count, int sel, const char* empty)
+{
+	C2D_DrawRectSolid(60, 20, 0.5f, 280, 200, C_PANEL);
+	gfx_rect_outline(60, 20, 280, 200, 1, C_DIM);
+	gfx_text(72, 28, 0.6f, C_TEXT, "%s", title);
+	if (count == 0)
+		gfx_text(72, 60, 0.5f, C_DIM, "%s", empty);
+	int first = sel - 6 < 0 ? 0 : sel - 6;
+	for (int i = first; i < count && i < first + 8; i++)
+	{
+		float y = 52 + (i - first) * 19;
+		if (i == sel)
+			C2D_DrawRectSolid(66, y - 2, 0.5f, 268, 18, C_SEL);
+		gfx_text(76, y, 0.52f, i == sel ? C_ACCENT : C_TEXT, "%s", items[i]);
+	}
+	gfx_text(72, 204, 0.42f, C_DIM, "Up/Down select   A: OK   B: back");
+}
+
+static void draw_top(void)
+{
+	if (previewMode && mode == MODE_DRAW)
+		draw_top_preview();
+	else
+		draw_top_tools();
+
+	if (mode == MODE_MENU)
+		draw_list("Menu", MENU_ITEMS, MENU_COUNT, menuSel, "");
+	else if (mode == MODE_NEW)
+	{
+		const char* labels[PRESET_COUNT];
+		for (int i = 0; i < PRESET_COUNT; i++) labels[i] = PRESETS[i].label;
+		draw_list("New canvas", labels, PRESET_COUNT, newSel, "");
+	}
+	else if (mode == MODE_OPEN)
+	{
+		static const char* labels[128];
+		for (int i = 0; i < openCount; i++) labels[i] = openFiles[i];
+		draw_list("Open project", labels, openCount, openSel, "No projects in /3ds/pixel-ui-designer/projects");
+	}
+	else if (mode == MODE_CONFIRM)
+	{
+		C2D_DrawRectSolid(70, 80, 0.5f, 260, 80, C_PANEL);
+		gfx_rect_outline(70, 80, 260, 80, 1, C_ACCENT);
+		gfx_text(84, 96, 0.55f, C_TEXT, "%s", confirmMsg);
+		gfx_text(84, 132, 0.5f, C_DIM, "A: yes    B: no");
+	}
+}
+
+// ---- main ----------------------------------------------------------------------------
 
 int main(int argc, char* argv[])
 {
 	gfxInitDefault();
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
-	C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
+	C2D_Init(8192);
 	C2D_Prepare();
 
 	C3D_RenderTarget* top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget* bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
-	C2D_TextBuf textBuf = C2D_TextBufNew(256);
-	C2D_Text titleText, hintText;
-	C2D_TextParse(&titleText, textBuf, APP_NAME);
-	C2D_TextParse(&hintText, textBuf, "Draw on the bottom screen.\nSTART: exit");
-	C2D_TextOptimize(&titleText);
-	C2D_TextOptimize(&hintText);
-
-	if (!canvasInit())
+	if (!gfx_init() || !doc_new(&doc, 32, 32))
 		svcBreak(USERBREAK_PANIC);
+	view_fit();
+	after_doc_change();
 
-	u32 bgTop = C2D_Color32(0x20, 0x22, 0x28, 0xFF);
-	u32 fgTop = C2D_Color32(0xF0, 0xF0, 0xF0, 0xFF);
-	u32 dimTop = C2D_Color32(0xA0, 0xA4, 0xB0, 0xFF);
-	u32 bgBottom = C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF);
-
-	bool penDown = false;
-	int lastX = 0, lastY = 0;
-
-	while (aptMainLoop())
+	while (running && aptMainLoop())
 	{
 		hidScanInput();
-		u32 kDown = hidKeysDown();
-		u32 kHeld = hidKeysHeld();
-		if (kDown & KEY_START)
-			break;
+		u32 kDown = hidKeysDown(), kHeld = hidKeysHeld(), kUp = hidKeysUp();
+		touchPosition touch;
+		hidTouchRead(&touch);
 
-		if (kHeld & KEY_TOUCH)
+		if (mode == MODE_DRAW)
+			update_draw(kDown, kHeld, kUp, touch);
+		else if (mode == MODE_PICKER)
 		{
-			touchPosition touch;
-			hidTouchRead(&touch);
-			int x = touch.px, y = touch.py;
-			if (penDown)
-				canvasLine(lastX, lastY, x, y, COLOR_BLACK);
-			else
-				canvasPlot(x, y, COLOR_BLACK);
-			lastX = x;
-			lastY = y;
-			penDown = true;
+			PickResult r = picker_update(kDown, kHeld, touch);
+			if (r != PICK_OPEN)
+			{
+				if (r == PICK_OK && picker_color() != doc.palette[color])
+				{
+					hist_begin(&doc);
+					hist_commit();
+					doc.palette[color] = picker_color();
+					doc.dirty = true;
+					after_doc_change();
+				}
+				mode = MODE_DRAW;
+				touchTarget = (kHeld & KEY_TOUCH) ? TOUCH_STRIP : TOUCH_NONE; // don't draw with the closing tap
+			}
 		}
 		else
-		{
-			penDown = false;
-		}
+			update_menus(kDown);
 
-		if (canvasDirty)
-		{
-			C3D_TexFlush(&canvasTex);
-			canvasDirty = false;
-		}
+		if (statusTimer > 0)
+			statusTimer--;
+		gfx_canvas_flush();
 
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+		gfx_frame_begin();
 
-		C2D_TargetClear(top, bgTop);
+		C2D_TargetClear(top, C_BG_TOP);
 		C2D_SceneBegin(top);
-		float tw, th;
-		C2D_TextGetDimensions(&titleText, 1.2f, 1.2f, &tw, &th);
-		C2D_DrawText(&titleText, C2D_WithColor, (400.0f - tw) / 2.0f, 90.0f, 0.5f, 1.2f, 1.2f, fgTop);
-		C2D_DrawText(&hintText, C2D_WithColor, 16.0f, 190.0f, 0.5f, 0.55f, 0.55f, dimTop);
+		draw_top();
 
-		C2D_TargetClear(bottom, bgBottom);
+		C2D_TargetClear(bottom, C_BG_BOT);
 		C2D_SceneBegin(bottom);
-		C2D_DrawImageAt(canvasImg, 0.0f, 0.0f, 0.5f, NULL, 1.0f, 1.0f);
+		draw_bottom();
 
 		C3D_FrameEnd(0);
 	}
 
-	C3D_TexDelete(&canvasTex);
-	C2D_TextBufDelete(textBuf);
+	doc_free(&doc);
+	hist_clear();
+	gfx_fini();
 	C2D_Fini();
 	C3D_Fini();
 	gfxExit();

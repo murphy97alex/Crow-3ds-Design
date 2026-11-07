@@ -16,7 +16,18 @@ permissions:
   contents: write # needed to publish releases on tags
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests (file format, undo)
+        run: |
+          cc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I source \
+            tests/test_pxd.c source/pxd.c source/doc.c -o test_pxd
+          ./test_pxd
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
     steps:

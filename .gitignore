@@ -23,3 +23,6 @@ tools/
 *.swp
 .DS_Store
 Thumbs.db
+test.pxd
+bad.pxd
+test_pxd
