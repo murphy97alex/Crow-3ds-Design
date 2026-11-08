@@ -8,6 +8,9 @@ static Rect sel;                    // selection rect, or the floating layer's r
 static uint8_t base[DOC_MAX_W * DOC_MAX_H]; // frame under the floating layer
 static uint8_t* flt;                // floating pixels (sel.w * sel.h)
 static uint8_t* clip;
+static Mirror floatMirror = MIRROR_OFF;
+
+void sel_set_float_mirror(Mirror m) { floatMirror = m; }
 static int clipW, clipH;
 
 bool sel_active(void) { return active; }
@@ -75,8 +78,18 @@ static void render(Doc* d)
 		{
 			int x = sel.x + i;
 			uint8_t v = flt[j * sel.w + i];
-			if (x >= 0 && x < d->w && v != PIX_TRANSPARENT)
+			if (v == PIX_TRANSPARENT)
+				continue;
+			if (x >= 0 && x < d->w)
 				px[y * d->w + x] = v;
+			int mx = d->w - 1 - x, my = d->h - 1 - y;
+			bool mxOk = mx >= 0 && mx < d->w;
+			if ((floatMirror == MIRROR_X || floatMirror == MIRROR_XY) && mxOk)
+				px[y * d->w + mx] = v;
+			if ((floatMirror == MIRROR_Y || floatMirror == MIRROR_XY) && x >= 0 && x < d->w)
+				px[my * d->w + x] = v;
+			if (floatMirror == MIRROR_XY && mxOk)
+				px[my * d->w + mx] = v;
 		}
 	}
 }
@@ -144,6 +157,7 @@ void sel_commit(Doc* d)
 	if (frame_changed(d)) { hist_commit(); d->dirty = true; }
 	else hist_abort();
 	floating = false;
+	floatMirror = MIRROR_OFF;
 	free(flt);
 	flt = NULL;
 	// keep the selection on the visible part of the canvas
@@ -162,6 +176,7 @@ void sel_cancel(Doc* d)
 	memcpy(doc_pixels(d), before, (size_t)d->w * d->h);
 	hist_abort();
 	floating = false;
+	floatMirror = MIRROR_OFF;
 	free(flt);
 	flt = NULL;
 	active = false;

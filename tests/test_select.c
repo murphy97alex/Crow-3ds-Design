@@ -78,6 +78,22 @@ int main(void)
 		assert(hist_undo(&d) && count(4) == 0 && !hist_undo(&d));
 	}
 
+	// mirrored stamp: copies appear while floating and stay after commit
+	doc_new(&d, 6, 4); sel_reset();
+	{
+		uint8_t a[1] = { 2 };
+		sel_float_pixels(&d, a, 1, 1, 0, 1);
+		sel_set_float_mirror(MIRROR_XY);
+		sel_move_to(&d, 1, 0);
+		assert(at(1, 0) == 2 && at(4, 0) == 2 && at(1, 3) == 2 && at(4, 3) == 2 && count(2) == 4);
+		sel_commit(&d);
+		assert(count(2) == 4);
+		uint8_t b[1] = { 3 };
+		sel_float_pixels(&d, b, 1, 1, 0, 0);   // mirror resets after commit
+		assert(count(3) == 1);
+		sel_cancel(&d);
+	}
+
 	// shift with wrap
 	doc_new(&d, 4, 3); sel_reset();
 	doc_pixels(&d)[0] = 1;

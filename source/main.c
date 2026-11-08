@@ -46,8 +46,8 @@
 
 // ---- tools -----------------------------------------------------------------
 
-typedef enum { TOOL_PENCIL, TOOL_MIRROR, TOOL_ERASER, TOOL_FILL, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
-static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Mirror", "Eraser", "Fill", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Eyedropper" };
+typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_EYEDROPPER, TOOL_MIRROR, TOOL_COUNT } Tool;
+static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Eyedropper", "Mirror" };
 
 static bool is_shape(Tool t) { return t == TOOL_LINE || t == TOOL_RECT || t == TOOL_ELLIPSE; }
 
@@ -61,7 +61,7 @@ static Brush brushes[TOOL_COUNT] = {
 static bool shapeFilled[TOOL_COUNT];
 static bool fillReplace;
 static Mirror mirrorMode = MIRROR_X;   // axis for the Mirror tool
-static bool mirrorOn = true;
+static bool mirrorOn = false;          // applies to every drawing tool
 static bool stampDragSize;             // Stamp: false = original size, true = drag to size
 
 static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
@@ -82,6 +82,8 @@ static int stampCount, stampSel;
 static uint8_t* stampPx;               // stamp being placed (original pixels)
 static int stampW, stampH;
 static int optSel;
+static Tool optTool;   // tool whose options panel is open
+static int listPos;    // D-pad cursor in the tool list (Mirror is a settings entry, not a tool)
 
 // ---- app state ---------------------------------------------------------------
 
@@ -223,6 +225,7 @@ static void set_tool(Tool t)
 		refresh_stamps();
 	lastTool = tool;
 	tool = t;
+	listPos = t;
 }
 
 static void eyedrop(int cx, int cy)
@@ -254,7 +257,7 @@ static int opt_rows(Tool t, OptKind* rows)
 	case TOOL_PENCIL:
 		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
 	case TOOL_MIRROR:
-		rows[n++] = OPT_MIRRORON; rows[n++] = OPT_MIRROR; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
+		rows[n++] = OPT_MIRRORON; rows[n++] = OPT_MIRROR; break;
 	case TOOL_ERASER:
 		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
 	case TOOL_FILL:
@@ -311,16 +314,16 @@ static const char* opt_label(OptKind k)
 
 static void opt_value(OptKind k, char* out, size_t n)
 {
-	Brush* b = &brushes[tool];
+	Brush* b = &brushes[optTool];
 	switch (k)
 	{
 	case OPT_SIZE: snprintf(out, n, "%d px", b->size); break;
 	case OPT_SHAPE: snprintf(out, n, "%s", SHAPE_NAMES[b->shape]); break;
 	case OPT_PIXPERF: snprintf(out, n, "%s%s", b->pixelPerfect ? "On" : "Off", b->pixelPerfect && b->size > 1 ? " (size 1 only)" : ""); break;
-	case OPT_STYLE: snprintf(out, n, "%s", shapeFilled[tool] ? "Filled" : "Outline"); break;
+	case OPT_STYLE: snprintf(out, n, "%s", shapeFilled[optTool] ? "Filled" : "Outline"); break;
 	case OPT_FILLMODE: snprintf(out, n, "%s", fillReplace ? "Replace color" : "Connected area"); break;
 	case OPT_MIRROR: snprintf(out, n, "%s", MIRROR_NAMES[mirrorMode]); break;
-	case OPT_MIRRORON: snprintf(out, n, "%s", mirrorOn ? "On" : "Off (plain pencil)"); break;
+	case OPT_MIRRORON: snprintf(out, n, "%s", mirrorOn ? "On" : "Off"); break;
 	case OPT_STAMPSIZE: snprintf(out, n, "%s", stampDragSize ? "Drag to size" : "Original"); break;
 	case OPT_STAMP:
 		if (stampCount) snprintf(out, n, "%s  (%d/%d)", stampNames[stampSel], stampSel + 1, stampCount);
@@ -332,7 +335,7 @@ static void opt_value(OptKind k, char* out, size_t n)
 
 static void opt_change(OptKind k, int dir)
 {
-	Brush* b = &brushes[tool];
+	Brush* b = &brushes[optTool];
 	switch (k)
 	{
 	case OPT_SIZE:
@@ -342,14 +345,14 @@ static void opt_change(OptKind k, int dir)
 		break;
 	case OPT_SHAPE:
 	{
-		int count = tool == TOOL_LINE ? 2 : BRUSH_SHAPE_COUNT; // no dither lines
+		int count = optTool == TOOL_LINE ? 2 : BRUSH_SHAPE_COUNT; // no dither lines
 		b->shape = (b->shape + count + dir) % count;
 		break;
 	}
 	case OPT_PIXPERF: b->pixelPerfect = !b->pixelPerfect; break;
-	case OPT_STYLE: shapeFilled[tool] = !shapeFilled[tool]; break;
+	case OPT_STYLE: shapeFilled[optTool] = !shapeFilled[optTool]; break;
 	case OPT_FILLMODE: fillReplace = !fillReplace; break;
-	case OPT_MIRROR: // Left-right, Top-bottom, Both (no "Off": that's the Pencil)
+	case OPT_MIRROR: // Left-right, Top-bottom, Both ("Off" is the On/Off row)
 		mirrorMode = (Mirror)((mirrorMode - 1 + 3 + dir) % 3 + 1);
 		break;
 	case OPT_STAMP: if (stampCount) stampSel = (stampSel + stampCount + dir) % stampCount; break;
@@ -418,7 +421,7 @@ static void run_option_action(OptKind k)
 static void update_options(u32 kDown)
 {
 	OptKind rows[OPT_MAX_ROWS];
-	int n = opt_rows(tool, rows);
+	int n = opt_rows(optTool, rows);
 	if (optSel >= n) optSel = n ? n - 1 : 0;
 	if (kDown & KEY_B) { mode = MODE_DRAW; return; }
 	if (kDown & KEY_A)
@@ -444,9 +447,7 @@ static void tool_summary(Tool t, char* out, size_t n)
 	case TOOL_PENCIL:
 		snprintf(out, n, "%d %s%s", b->size, SHAPE_NAMES[b->shape], b->pixelPerfect && b->size == 1 ? " PP" : ""); break;
 	case TOOL_MIRROR:
-		if (mirrorOn) snprintf(out, n, "%s %d %s", MIRROR_NAMES[mirrorMode], b->size, SHAPE_NAMES[b->shape]);
-		else snprintf(out, n, "Off %d %s", b->size, SHAPE_NAMES[b->shape]);
-		break;
+		snprintf(out, n, "%s", mirrorOn ? MIRROR_NAMES[mirrorMode] : "Off"); break;
 	case TOOL_ERASER:
 	case TOOL_LINE:
 		snprintf(out, n, "%d %s", b->size, SHAPE_NAMES[b->shape]); break;
@@ -871,6 +872,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	if ((kDown & KEY_A) && touchTarget == TOUCH_NONE)
 	{
 		if (tool == TOOL_STAMP) refresh_stamps();
+		optTool = tool;
 		mode = MODE_OPTIONS;
 		optSel = 0;
 		return;
@@ -880,8 +882,19 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	if (touchTarget == TOUCH_NONE) // no tool changes mid-stroke
 	{
 		if (kDown & KEY_Y) set_tool(lastTool);
-		if (kDown & KEY_DLEFT) set_tool((tool + TOOL_COUNT - 1) % TOOL_COUNT);
-		if (kDown & KEY_DRIGHT) set_tool((tool + 1) % TOOL_COUNT);
+		if (kDown & (KEY_DLEFT | KEY_DRIGHT))
+		{
+			listPos = (listPos + TOOL_COUNT + ((kDown & KEY_DRIGHT) ? 1 : -1)) % TOOL_COUNT;
+			if (listPos == TOOL_MIRROR)
+			{
+				// Mirror is a setting for all tools: show it, keep drawing with the current tool
+				optTool = TOOL_MIRROR;
+				optSel = 0;
+				mode = MODE_OPTIONS;
+				return;
+			}
+			set_tool(listPos);
+		}
 	}
 	if (kDown & KEY_DUP) view_zoom(+1);
 	if (kDown & KEY_DDOWN) view_zoom(-1);
@@ -941,6 +954,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 					moveOffX = stampW / 2;
 					moveOffY = stampH / 2;
 					sel_float_pixels(&doc, stampPx, stampW, stampH, cx - moveOffX, cy - moveOffY);
+					sel_set_float_mirror(mirrorOn ? mirrorMode : MIRROR_OFF);
 					selDrag = stampDragSize ? SEL_SIZING : SEL_MOVING;
 				}
 			}
@@ -1059,11 +1073,11 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				strokeValue = doc_color_index(&doc, curColor, true);
 				value = tool == TOOL_ERASER ? PIX_TRANSPARENT : strokeValue;
 				hist_begin(&doc);
-				tools_begin(&doc, tool == TOOL_MIRROR && mirrorOn ? mirrorMode : MIRROR_OFF);
+				tools_begin(&doc, mirrorOn ? mirrorMode : MIRROR_OFF);
 				strokeActive = true;
 				if (tool == TOOL_FILL)
 					tools_fill(cx, cy, strokeValue, fillReplace);
-				else if (tool == TOOL_PENCIL || tool == TOOL_MIRROR || tool == TOOL_ERASER)
+				else if (tool == TOOL_PENCIL || tool == TOOL_ERASER)
 					tools_stroke_start(cx, cy, value, &brushes[tool]);
 				// shapes are drawn below while dragging
 			}
@@ -1076,7 +1090,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		screen_to_canvas(touch.px, touch.py, &cx, &cy);
 		if (dropper && !strokeActive)
 			eyedrop(cx, cy);
-		else if (strokeActive && (tool == TOOL_PENCIL || tool == TOOL_MIRROR || tool == TOOL_ERASER) && !(kDown & KEY_TOUCH))
+		else if (strokeActive && (tool == TOOL_PENCIL || tool == TOOL_ERASER) && !(kDown & KEY_TOUCH))
 			tools_stroke_to(cx, cy, value, &brushes[tool]);
 		else if (strokeActive && is_shape(tool))
 		{
@@ -1178,7 +1192,7 @@ static void draw_bottom(void)
 	}
 
 	// mirror guides
-	if (tool == TOOL_MIRROR && mirrorOn)
+	if (mirrorOn && tool != TOOL_SELECT && tool != TOOL_EYEDROPPER)
 	{
 		u32 mc = C2D_Color32(0xFF, 0x50, 0xC8, 0xB0);
 		if (mirrorMode == MIRROR_X || mirrorMode == MIRROR_XY)
@@ -1261,9 +1275,12 @@ static void draw_top_tools(void)
 	for (int i = 0; i < TOOL_COUNT; i++)
 	{
 		float y = 40 + i * 12;
-		if (i == tool)
+		bool on = i == tool || (i == TOOL_MIRROR && mode == MODE_OPTIONS && optTool == TOOL_MIRROR);
+		if (on)
 			C2D_DrawRectSolid(8, y - 1, 0.5f, 180, 12, C_SEL);
-		gfx_text(14, y - 1, 0.42f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
+		if (i == TOOL_MIRROR)
+			C2D_DrawRectSolid(8, y - 2, 0.5f, 180, 1, C_PANEL);  // separator: Mirror is a setting
+		gfx_text(14, y - 1, 0.42f, on || (i == TOOL_MIRROR && mirrorOn) ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
 		char sum[32];
 		tool_summary(i, sum, sizeof(sum));
 		if (sum[0])
@@ -1380,12 +1397,12 @@ static void draw_top(void)
 	else if (mode == MODE_OPTIONS)
 	{
 		OptKind rows[OPT_MAX_ROWS];
-		int n = opt_rows(tool, rows);
+		int n = opt_rows(optTool, rows);
 		float rh = n > 6 ? 15 : 22, top = n > 6 ? 8 : 40;
 		float ph = 36 + n * rh + 22;
 		C2D_DrawRectSolid(40, top, 0.5f, 320, ph, C_PANEL);
 		gfx_rect_outline(40, top, 320, ph, 1, C_ACCENT);
-		gfx_text(52, top + 6, 0.55f, C_TEXT, "%s %s", TOOL_NAMES[tool], tool == TOOL_SELECT ? "actions" : "options");
+		gfx_text(52, top + 6, 0.55f, C_TEXT, "%s %s", TOOL_NAMES[optTool], optTool == TOOL_SELECT ? "actions" : "options");
 		bool anyAction = false;
 		for (int i = 0; i < n; i++)
 		{

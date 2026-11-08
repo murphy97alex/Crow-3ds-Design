@@ -44,8 +44,8 @@ Stylus in right hand, frequent actions on left.
 ## Decisions (2026-11-07)
 - **v1 tools:** pencil, eraser, flood fill; line, rectangle, ellipse (outline or filled);
   rectangle select + move, copy/paste, flip/rotate 90° (also the basis for stamps);
-  mirror drawing (horizontal/vertical symmetry) — as its own **Mirror** tool, a symmetric
-  pencil (changed 2026-11-08); other tools don't mirror. Eyedropper stays on hold-R.
+  mirror drawing (horizontal/vertical symmetry) — a **Mirror** entry at the end of the tool
+  list opens On/Off + axis; when on it applies to every drawing tool and stamps (2026-11-08). Eyedropper stays on hold-R.
 - **Buttons:** use the draft layout above for v1; left-handed mirror in Settings.
 - **Colors:** Photoshop/Clip Studio style (changed 2026-11-08 after testing). You draw with a
   current color; the 32 swatches are saved colors edited with the square + hue bar picker, hex,
