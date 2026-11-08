@@ -28,6 +28,9 @@ jobs:
           cc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I source \
             tests/test_tools.c source/tools.c source/doc.c -lm -o test_tools
           ./test_tools
+          cc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I source tests/test_select.c \
+            source/select.c source/png.c source/stamps.c source/pxd.c source/doc.c -lz -o test_select
+          ./test_select
 
   build:
     needs: test

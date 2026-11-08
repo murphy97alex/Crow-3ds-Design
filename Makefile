@@ -18,7 +18,7 @@ APP_AUTHOR      := murphy97alex
 APP_PRODUCT_CODE := CTR-H-PXUI
 APP_UNIQUE_ID   := 0xC7A30
 APP_VERSION_MAJOR := 0
-APP_VERSION_MINOR := 2
+APP_VERSION_MINOR := 3
 APP_VERSION_MICRO := 0
 
 #---------------------------------------------------------------------------------
@@ -52,9 +52,9 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS := -g $(ARCH)
 LDFLAGS  = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    := -lcitro2d -lcitro3d -lctru -lm
+LIBS    := -lcitro2d -lcitro3d -lctru -lz -lm
 
-LIBDIRS := $(CTRULIB)
+LIBDIRS := $(PORTLIBS) $(CTRULIB)
 
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))

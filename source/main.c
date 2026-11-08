@@ -13,12 +13,17 @@
 #include "doc.h"
 #include "gfx.h"
 #include "picker.h"
+#include "png.h"
 #include "pxd.h"
+#include "select.h"
+#include "stamps.h"
 #include "tools.h"
 
 #define APP_NAME "Pixel UI Designer"
 #define SAVE_ROOT "sdmc:/3ds/pixel-ui-designer"
 #define SAVE_DIR SAVE_ROOT "/projects"
+#define STAMP_DIR SAVE_ROOT "/stamps"
+#define EXPORT_DIR SAVE_ROOT "/export"
 
 // Bottom screen layout
 #define BOT_W 320
@@ -41,8 +46,8 @@
 
 // ---- tools -----------------------------------------------------------------
 
-typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
-static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Line", "Rectangle", "Ellipse", "Eyedropper" };
+typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
+static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Eyedropper" };
 
 static bool is_shape(Tool t) { return t == TOOL_LINE || t == TOOL_RECT || t == TOOL_ELLIPSE; }
 
@@ -60,12 +65,22 @@ static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither
 static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bottom", "Both" };
 
 // options panel rows
-typedef enum { OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR } OptKind;
+typedef enum {
+	OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR, OPT_STAMP,
+	// actions (A runs them)
+	OPT_ACT_FIRST, OPT_SELALL = OPT_ACT_FIRST, OPT_DESELECT, OPT_COPY, OPT_CUT, OPT_PASTE, OPT_DELETE,
+	OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_SAVESTAMP,
+} OptKind;
+#define OPT_MAX_ROWS 12
+
+// stamps
+static char stampNames[STAMP_MAX][DOC_NAME_MAX];
+static int stampCount, stampSel;
 static int optSel;
 
 // ---- app state ---------------------------------------------------------------
 
-typedef enum { MODE_DRAW, MODE_MENU, MODE_NEW, MODE_OPEN, MODE_CONFIRM, MODE_PICKER, MODE_OPTIONS } Mode;
+typedef enum { MODE_DRAW, MODE_MENU, MODE_NEW, MODE_OPEN, MODE_CONFIRM, MODE_PICKER, MODE_OPTIONS, MODE_EXPORT, MODE_SHIFT } Mode;
 typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE } Action;
 
 static Doc doc;
@@ -86,6 +101,10 @@ enum { TOUCH_NONE, TOUCH_CANVAS, TOUCH_STRIP };
 static int touchTarget = TOUCH_NONE;
 static int startCX, startCY;   // where the current stroke/shape began
 static bool strokeActive;
+enum { SEL_IDLE, SEL_DRAWING, SEL_MOVING };
+static int selDrag = SEL_IDLE;
+static int moveOffX, moveOffY;  // stylus offset inside the floating pixels
+static int shiftX, shiftY, shiftLastCX, shiftLastCY;
 
 // menus
 static int menuSel, newSel, openSel, openCount;
@@ -155,10 +174,35 @@ static void screen_to_canvas(int sx, int sy, int* cx, int* cy)
 
 // ---- editing -------------------------------------------------------------------
 
+static void after_doc_change(void);
+
+static void refresh_stamps(void)
+{
+	stampCount = stamp_list(STAMP_DIR, stampNames, STAMP_MAX);
+	if (stampSel >= stampCount) stampSel = stampCount ? stampCount - 1 : 0;
+}
+
+// Drop any floating pixels into the canvas (one undo step).
+static void finish_floating(void)
+{
+	if (sel_floating())
+	{
+		sel_commit(&doc);
+		after_doc_change();
+	}
+}
+
 static void set_tool(Tool t)
 {
 	if (t == tool)
 		return;
+	if (tool == TOOL_SELECT || tool == TOOL_STAMP)
+	{
+		sel_clear(&doc);
+		after_doc_change();
+	}
+	if (t == TOOL_STAMP)
+		refresh_stamps();
 	lastTool = tool;
 	tool = t;
 }
@@ -195,6 +239,17 @@ static int opt_rows(Tool t, OptKind* rows)
 	case TOOL_RECT:
 	case TOOL_ELLIPSE:
 		rows[n++] = OPT_STYLE; rows[n++] = OPT_SIZE; break;
+	case TOOL_SELECT:
+	{
+		static const OptKind acts[] = { OPT_SELALL, OPT_DESELECT, OPT_COPY, OPT_CUT, OPT_PASTE, OPT_DELETE,
+		                                OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_SAVESTAMP };
+		for (size_t i = 0; i < sizeof(acts) / sizeof(acts[0]); i++)
+			rows[n++] = acts[i];
+		return n;
+	}
+	case TOOL_STAMP:
+		rows[n++] = OPT_STAMP;
+		return n;
 	default:
 		break;
 	}
@@ -213,6 +268,18 @@ static const char* opt_label(OptKind k)
 	case OPT_STYLE: return "Style";
 	case OPT_FILLMODE: return "Mode";
 	case OPT_MIRROR: return "Mirror";
+	case OPT_STAMP: return "Stamp";
+	case OPT_SELALL: return "Select all";
+	case OPT_DESELECT: return "Deselect";
+	case OPT_COPY: return "Copy";
+	case OPT_CUT: return "Cut";
+	case OPT_PASTE: return "Paste";
+	case OPT_DELETE: return "Delete";
+	case OPT_FLIPH: return "Flip left-right";
+	case OPT_FLIPV: return "Flip top-bottom";
+	case OPT_ROTATE: return "Rotate 90\xC2\xB0";
+	case OPT_OUTLINE: return "Outline (current color)";
+	case OPT_SAVESTAMP: return "Save as stamp...";
 	}
 	return "";
 }
@@ -228,6 +295,11 @@ static void opt_value(OptKind k, char* out, size_t n)
 	case OPT_STYLE: snprintf(out, n, "%s", shapeFilled[tool] ? "Filled" : "Outline"); break;
 	case OPT_FILLMODE: snprintf(out, n, "%s", fillReplace ? "Replace color" : "Connected area"); break;
 	case OPT_MIRROR: snprintf(out, n, "%s", MIRROR_NAMES[mirrorMode]); break;
+	case OPT_STAMP:
+		if (stampCount) snprintf(out, n, "%s  (%d/%d)", stampNames[stampSel], stampSel + 1, stampCount);
+		else snprintf(out, n, "none saved yet");
+		break;
+	default: out[0] = 0; break;
 	}
 }
 
@@ -251,16 +323,81 @@ static void opt_change(OptKind k, int dir)
 	case OPT_STYLE: shapeFilled[tool] = !shapeFilled[tool]; break;
 	case OPT_FILLMODE: fillReplace = !fillReplace; break;
 	case OPT_MIRROR: mirrorMode = (mirrorMode + MIRROR_COUNT + dir) % MIRROR_COUNT; break;
+	case OPT_STAMP: if (stampCount) stampSel = (stampSel + stampCount + dir) % stampCount; break;
+	default: break;
 	}
+}
+
+static bool ask_text(const char* hint, const char* init, char* out, size_t n);
+static void ensure_dirs(void);
+
+static void save_stamp(void)
+{
+	uint8_t* px;
+	int w, h;
+	if (!sel_get_pixels(&doc, &px, &w, &h))
+	{
+		set_status("Select something first");
+		return;
+	}
+	char name[DOC_NAME_MAX];
+	if (ask_text("Stamp name", "stamp", name, sizeof(name)))
+	{
+		ensure_dirs();
+		const char* err = stamp_save(STAMP_DIR, name, px, w, h, doc.palette);
+		char msg[96];
+		snprintf(msg, sizeof(msg), err ? "Stamp save failed: %s" : "Saved stamp %s", err ? err : name);
+		set_status(msg);
+		refresh_stamps();
+	}
+	free(px);
+}
+
+static void run_option_action(OptKind k)
+{
+	bool needSel = k == OPT_COPY || k == OPT_CUT || k == OPT_DELETE || k == OPT_SAVESTAMP;
+	if (needSel && !sel_active())
+	{
+		set_status("Select something first");
+		return;
+	}
+	switch (k)
+	{
+	case OPT_SELALL: sel_all(&doc); break;
+	case OPT_DESELECT: sel_clear(&doc); break;
+	case OPT_COPY: sel_copy(&doc); set_status("Copied"); break;
+	case OPT_CUT: sel_cut(&doc); set_status("Cut"); break;
+	case OPT_PASTE:
+		if (!sel_has_clip()) { set_status("Nothing copied yet"); break; }
+		if (sel_active()) { Rect r = sel_rect(); sel_paste(&doc, r.x, r.y); }
+		else sel_paste(&doc, viewX < 0 ? 0 : (int)viewX, viewY < 0 ? 0 : (int)viewY);
+		set_status("Pasted - drag to move, B to drop");
+		break;
+	case OPT_DELETE: sel_delete(&doc); break;
+	case OPT_FLIPH: sel_flip(&doc, true); break;
+	case OPT_FLIPV: sel_flip(&doc, false); break;
+	case OPT_ROTATE: sel_rotate(&doc); break;
+	case OPT_OUTLINE: sel_outline(&doc, color + 1); break;
+	case OPT_SAVESTAMP: save_stamp(); break;
+	default: break;
+	}
+	after_doc_change();
 }
 
 static void update_options(u32 kDown)
 {
-	OptKind rows[8];
+	OptKind rows[OPT_MAX_ROWS];
 	int n = opt_rows(tool, rows);
-	if (kDown & (KEY_A | KEY_B)) { mode = MODE_DRAW; return; }
+	if (optSel >= n) optSel = n ? n - 1 : 0;
+	if (kDown & KEY_B) { mode = MODE_DRAW; return; }
+	if (kDown & KEY_A)
+	{
+		mode = MODE_DRAW;
+		if (n && rows[optSel] >= OPT_ACT_FIRST)
+			run_option_action(rows[optSel]);
+		return;
+	}
 	if (n == 0) return;
-	if (optSel >= n) optSel = n - 1;
 	if (kDown & KEY_DUP) optSel = (optSel + n - 1) % n;
 	if (kDown & KEY_DDOWN) optSel = (optSel + 1) % n;
 	if (kDown & KEY_DLEFT) opt_change(rows[optSel], -1);
@@ -284,6 +421,11 @@ static void tool_summary(Tool t, char* out, size_t n)
 		else snprintf(out, n, "Outline %d", b->size);
 		break;
 	case TOOL_FILL: snprintf(out, n, "%s", fillReplace ? "Replace" : "Area"); break;
+	case TOOL_SELECT:
+		if (sel_active()) { Rect r = sel_rect(); snprintf(out, n, "%dx%d%s", r.w, r.h, sel_floating() ? " moving" : ""); }
+		else out[0] = 0;
+		break;
+	case TOOL_STAMP: snprintf(out, n, "%s", stampCount ? stampNames[stampSel] : "none"); break;
 	default: out[0] = 0; break;
 	}
 }
@@ -295,6 +437,8 @@ static void ensure_dirs(void)
 	mkdir("sdmc:/3ds", 0777);
 	mkdir(SAVE_ROOT, 0777);
 	mkdir(SAVE_DIR, 0777);
+	mkdir(STAMP_DIR, 0777);
+	mkdir(EXPORT_DIR, 0777);
 }
 
 static void project_path(char* out, size_t n, const char* name)
@@ -335,14 +479,14 @@ static void confirm(Action a, const char* msg)
 	mode = MODE_CONFIRM;
 }
 
-// Returns false if cancelled.
-static bool ask_name(char* out, size_t n)
+// Asks for a file name. Returns false if cancelled.
+static bool ask_text(const char* hint, const char* init, char* out, size_t n)
 {
 	SwkbdState kb;
 	char buf[DOC_NAME_MAX] = {0};
 	swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, DOC_NAME_MAX - 1);
-	swkbdSetHintText(&kb, "Project name");
-	swkbdSetInitialText(&kb, doc.name[0] ? doc.name : "untitled");
+	swkbdSetHintText(&kb, hint);
+	swkbdSetInitialText(&kb, init);
 	swkbdSetValidation(&kb, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
 	if (swkbdInputText(&kb, buf, sizeof(buf)) != SWKBD_BUTTON_CONFIRM)
 		return false;
@@ -357,6 +501,11 @@ static bool ask_name(char* out, size_t n)
 	}
 	out[j] = '\0';
 	return j > 0;
+}
+
+static bool ask_name(char* out, size_t n)
+{
+	return ask_text("Project name", doc.name[0] ? doc.name : "untitled", out, n);
 }
 
 static void save_as(void)
@@ -401,6 +550,7 @@ static void open_project(const char* name)
 {
 	char path[160];
 	project_path(path, sizeof(path), name);
+	sel_reset();
 	const char* err = pxd_load(&doc, path);
 	if (err)
 	{
@@ -410,6 +560,7 @@ static void open_project(const char* name)
 		return;
 	}
 	snprintf(doc.name, sizeof(doc.name), "%s", name);
+	hist_clear();
 	view_fit();
 	after_doc_change();
 	set_status("Opened");
@@ -417,6 +568,7 @@ static void open_project(const char* name)
 
 static void new_canvas(int w, int h)
 {
+	sel_reset();
 	if (!doc_new(&doc, w, h))
 	{
 		set_status("Couldn't create canvas");
@@ -442,8 +594,84 @@ static void run_action(Action a)
 
 // ---- menus ---------------------------------------------------------------------
 
-static const char* MENU_ITEMS[] = { "Back to canvas", "New canvas", "Save", "Save as...", "Open...", "Exit" };
-#define MENU_COUNT 6
+static const char* MENU_ITEMS[] = { "Back to canvas", "New canvas", "Save", "Save as...", "Open...",
+                                    "Export PNG...", "Shift canvas (wrap)...", "Exit" };
+#define MENU_COUNT 8
+
+// ---- PNG export ------------------------------------------------------------------
+
+typedef struct { int mult, fixed; } ExportSize;
+static const ExportSize EXPORT_SIZES[] = {
+	{ 1, 0 }, { 2, 0 }, { 3, 0 }, { 4, 0 }, { 6, 0 }, { 8, 0 },
+	{ 0, 16 }, { 0, 24 }, { 0, 32 }, { 0, 48 }, { 0, 64 }, { 0, 128 }, { 0, 256 },
+};
+#define EXPORT_SIZE_COUNT (int)(sizeof(EXPORT_SIZES) / sizeof(EXPORT_SIZES[0]))
+#define EXPORT_ROWS (EXPORT_SIZE_COUNT + 2)  // "Recommended" row + sizes + "Export" row
+static bool exportOn[EXPORT_SIZE_COUNT];
+static int exportSel;
+
+static void export_recommended(void)
+{
+	for (int i = 0; i < EXPORT_SIZE_COUNT; i++)
+	{
+		int m = EXPORT_SIZES[i].mult;
+		exportOn[i] = m == 1 || m == 2 || m == 4 || m == 8;
+	}
+}
+
+static bool export_is_recommended(void)
+{
+	for (int i = 0; i < EXPORT_SIZE_COUNT; i++)
+	{
+		int m = EXPORT_SIZES[i].mult;
+		if (exportOn[i] != (m == 1 || m == 2 || m == 4 || m == 8)) return false;
+	}
+	return true;
+}
+
+// Output size for an entry; returns false if too big. *even = whole-number scale.
+static bool export_dims(int i, int* w, int* h, bool* even)
+{
+	const ExportSize* e = &EXPORT_SIZES[i];
+	if (e->mult)
+	{
+		*w = doc.w * e->mult;
+		*h = doc.h * e->mult;
+		*even = true;
+	}
+	else
+	{
+		int longest = doc.w > doc.h ? doc.w : doc.h;
+		*w = (doc.w * e->fixed + longest / 2) / longest;
+		*h = (doc.h * e->fixed + longest / 2) / longest;
+		if (*w < 1) *w = 1;
+		if (*h < 1) *h = 1;
+		*even = e->fixed % longest == 0;
+	}
+	return *w <= PNG_MAX_DIM && *h <= PNG_MAX_DIM;
+}
+
+static void run_export(void)
+{
+	ensure_dirs();
+	const char* base = doc.name[0] ? doc.name : "untitled";
+	int done = 0, failed = 0;
+	for (int i = 0; i < EXPORT_SIZE_COUNT; i++)
+	{
+		int w, h;
+		bool even;
+		if (!exportOn[i] || !export_dims(i, &w, &h, &even)) continue;
+		char path[200];
+		snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx%d.png", base, w, h);
+		if (png_export(&doc, doc.curFrame, w, h, path)) failed++;
+		else done++;
+	}
+	char msg[96];
+	if (failed) snprintf(msg, sizeof(msg), "Exported %d PNG, %d failed", done, failed);
+	else if (done) snprintf(msg, sizeof(msg), "Exported %d PNG to /3ds/pixel-ui-designer/export", done);
+	else snprintf(msg, sizeof(msg), "No sizes ticked");
+	set_status(msg);
+}
 
 typedef struct { const char* label; int w, h; } Preset;
 static const Preset PRESETS[] = {
@@ -504,7 +732,13 @@ static void update_menus(u32 kDown)
 				break;
 			case 3: save_as(); break;
 			case 4: scan_projects(); openSel = 0; mode = MODE_OPEN; break;
-			case 5:
+			case 5: mode = MODE_EXPORT; exportSel = 0; break;
+			case 6:
+				shift_begin(&doc);
+				shiftX = shiftY = 0;
+				mode = MODE_SHIFT;
+				break;
+			case 7:
 				if (doc.dirty) confirm(ACT_EXIT, "Exit without saving?");
 				else running = false;
 				break;
@@ -537,6 +771,16 @@ static void update_menus(u32 kDown)
 			else run_action(ACT_OPEN);
 		}
 		break;
+	case MODE_EXPORT:
+		list_nav(kDown, &exportSel, EXPORT_ROWS);
+		if (kDown & KEY_B) mode = MODE_MENU;
+		if (kDown & KEY_A)
+		{
+			if (exportSel == 0) export_recommended();
+			else if (exportSel == EXPORT_ROWS - 1) { run_export(); mode = MODE_DRAW; }
+			else exportOn[exportSel - 1] = !exportOn[exportSel - 1];
+		}
+		break;
 	case MODE_CONFIRM:
 		if (kDown & KEY_A) run_action(confirmAction);
 		else if (kDown & KEY_B) mode = MODE_MENU;
@@ -548,10 +792,46 @@ static void update_menus(u32 kDown)
 
 // ---- draw mode input -------------------------------------------------------------
 
+static void update_shift(u32 kDown, u32 kHeld, touchPosition touch)
+{
+	int ox = shiftX, oy = shiftY;
+	if (kDown & KEY_DLEFT) shiftX--;
+	if (kDown & KEY_DRIGHT) shiftX++;
+	if (kDown & KEY_DUP) shiftY--;
+	if (kDown & KEY_DDOWN) shiftY++;
+	int cx, cy;
+	screen_to_canvas(touch.px, touch.py, &cx, &cy);
+	if ((kDown & KEY_TOUCH)) { shiftLastCX = cx; shiftLastCY = cy; }
+	else if (kHeld & KEY_TOUCH)
+	{
+		shiftX += cx - shiftLastCX;
+		shiftY += cy - shiftLastCY;
+		shiftLastCX = cx;
+		shiftLastCY = cy;
+	}
+	if (ox != shiftX || oy != shiftY)
+	{
+		shift_set(&doc, shiftX, shiftY);
+		after_doc_change();
+	}
+	if (kDown & (KEY_A | KEY_B))
+	{
+		shift_end(&doc, kDown & KEY_A);
+		after_doc_change();
+		mode = MODE_DRAW;
+	}
+}
+
 static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 {
-	if (kDown & KEY_START) { mode = MODE_MENU; menuSel = 0; return; }
-	if ((kDown & KEY_A) && touchTarget == TOUCH_NONE) { mode = MODE_OPTIONS; optSel = 0; return; }
+	if (kDown & KEY_START) { finish_floating(); mode = MODE_MENU; menuSel = 0; return; }
+	if ((kDown & KEY_A) && touchTarget == TOUCH_NONE)
+	{
+		if (tool == TOOL_STAMP) refresh_stamps();
+		mode = MODE_OPTIONS;
+		optSel = 0;
+		return;
+	}
 	if (kDown & KEY_SELECT) previewMode = !previewMode;
 	if (kDown & KEY_X) gridOn = !gridOn;
 	if (touchTarget == TOUCH_NONE) // no tool changes mid-stroke
@@ -565,8 +845,22 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 
 	if (touchTarget == TOUCH_NONE)
 	{
-		if ((kDown & KEY_L) && hist_undo(&doc)) after_doc_change();
-		if ((kDown & KEY_ZL) && hist_redo(&doc)) after_doc_change();
+		if (kDown & KEY_L)
+		{
+			if (sel_floating()) sel_cancel(&doc);   // undo a move/paste in progress
+			else if (hist_undo(&doc)) sel_clear(&doc);
+			after_doc_change();
+		}
+		if ((kDown & KEY_ZL) && !sel_floating() && hist_redo(&doc))
+		{
+			sel_clear(&doc);
+			after_doc_change();
+		}
+		if ((kDown & KEY_B) && tool == TOOL_SELECT && sel_active())
+		{
+			sel_clear(&doc);
+			after_doc_change();
+		}
 	}
 
 	circlePosition cp;
@@ -581,6 +875,66 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 
 	bool dropper = (kHeld & KEY_R) || tool == TOOL_EYEDROPPER;
 	uint8_t value = tool == TOOL_ERASER ? PIX_TRANSPARENT : color + 1;
+
+	if ((tool == TOOL_SELECT || tool == TOOL_STAMP) && !(kHeld & KEY_R) &&
+	    (touchTarget == TOUCH_CANVAS || ((kDown & KEY_TOUCH) && touch.py >= STRIP_H)))
+	{
+		int cx, cy;
+		screen_to_canvas(touch.px, touch.py, &cx, &cy);
+		if (kDown & KEY_TOUCH)
+		{
+			touchTarget = TOUCH_CANVAS;
+			startCX = cx;
+			startCY = cy;
+			if (tool == TOOL_STAMP)
+			{
+				uint8_t* px;
+				int w, h;
+				if (!stampCount) { set_status("No stamps yet - save one with Select, A"); selDrag = SEL_IDLE; }
+				else if (stamp_load(STAMP_DIR, stampNames[stampSel], doc.palette, &px, &w, &h)) { set_status("Couldn't load stamp"); selDrag = SEL_IDLE; }
+				else
+				{
+					moveOffX = w / 2;
+					moveOffY = h / 2;
+					sel_float_pixels(&doc, px, w, h, cx - moveOffX, cy - moveOffY);
+					free(px);
+					selDrag = SEL_MOVING;
+				}
+			}
+			else if (sel_contains(cx, cy))
+			{
+				if (!sel_floating()) sel_lift(&doc);
+				Rect r = sel_rect();
+				moveOffX = cx - r.x;
+				moveOffY = cy - r.y;
+				selDrag = SEL_MOVING;
+			}
+			else
+			{
+				sel_set(&doc, cx, cy, cx, cy);   // also drops any floating pixels
+				selDrag = SEL_DRAWING;
+			}
+		}
+		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_DRAWING)
+			sel_set(&doc, startCX, startCY, cx, cy);
+		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_MOVING)
+			sel_move_to(&doc, cx - moveOffX, cy - moveOffY);
+
+		if (!(kHeld & KEY_TOUCH))
+		{
+			if (selDrag == SEL_DRAWING && startCX == cx && startCY == cy)
+				sel_clear(&doc);                 // a tap outside deselects
+			if (tool == TOOL_STAMP && selDrag == SEL_MOVING)
+			{
+				sel_commit(&doc);                // place the stamp
+				sel_clear(&doc);
+			}
+			selDrag = SEL_IDLE;
+			touchTarget = TOUCH_NONE;
+		}
+		after_doc_change();
+		return;
+	}
 
 	if (kDown & KEY_TOUCH)
 	{
@@ -757,7 +1111,33 @@ static void draw_bottom(void)
 	gfx_rect_outline(hx, hy, SW_W, SW_H, 2, C2D_Color32(0, 0, 0, 255));
 	gfx_rect_outline(hx + 1, hy + 1, SW_W - 2, SW_H - 2, 1, C2D_Color32(255, 255, 255, 255));
 
-	if (mode != MODE_DRAW)
+	// selection marquee
+	if (sel_active())
+	{
+		Rect r = sel_rect();
+		float x0 = sx + r.x * z - 1, y0 = sy + r.y * z - 1, w = r.w * z + 2, h = r.h * z + 2;
+		static int phase;
+		phase = (phase + 1) % 16;
+		u32 cw = C2D_Color32(255, 255, 255, 255), cb = C2D_Color32(0, 0, 0, 255);
+		for (float t = 0; t < w; t += 4)
+		{
+			u32 c = ((int)(t + phase / 4) / 4) & 1 ? cw : cb;
+			float len = t + 4 > w ? w - t : 4;
+			if (y0 >= VIEW_Y) C2D_DrawRectSolid(x0 + t, y0, 0.5f, len, 1, c);
+			if (y0 + h - 1 >= VIEW_Y) C2D_DrawRectSolid(x0 + t, y0 + h - 1, 0.5f, len, 1, c);
+		}
+		for (float t = 0; t < h; t += 4)
+		{
+			u32 c = ((int)(t + phase / 4) / 4) & 1 ? cw : cb;
+			float yy = y0 + t, len = t + 4 > h ? h - t : 4;
+			if (yy + len <= VIEW_Y) continue;
+			if (yy < VIEW_Y) { len -= VIEW_Y - yy; yy = VIEW_Y; }
+			C2D_DrawRectSolid(x0, yy, 0.5f, 1, len, c);
+			C2D_DrawRectSolid(x0 + w - 1, yy, 0.5f, 1, len, c);
+		}
+	}
+
+	if (mode != MODE_DRAW && mode != MODE_SHIFT)
 		C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, BOT_H, C2D_Color32(0, 0, 0, 0x90));
 }
 
@@ -786,24 +1166,24 @@ static void draw_top_tools(void)
 	gfx_text(10, 26, 0.42f, C_DIM, "TOOLS  D-pad < >   A: options");
 	for (int i = 0; i < TOOL_COUNT; i++)
 	{
-		float y = 40 + i * 15;
+		float y = 40 + i * 13;
 		if (i == tool)
-			C2D_DrawRectSolid(8, y - 1, 0.5f, 180, 15, C_SEL);
-		gfx_text(14, y, 0.48f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
+			C2D_DrawRectSolid(8, y - 1, 0.5f, 180, 13, C_SEL);
+		gfx_text(14, y - 1, 0.45f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
 		char sum[32];
 		tool_summary(i, sum, sizeof(sum));
 		if (sum[0])
-			gfx_text(96, y + 1, 0.42f, C_DIM, "%s", sum);
+			gfx_text(96, y, 0.4f, C_DIM, "%s", sum);
 	}
 
 	// color
-	float cy = 40 + TOOL_COUNT * 15 + 6;
+	float cy = 40 + TOOL_COUNT * 13 + 5;
 	C2D_DrawRectSolid(10, cy, 0.5f, 22, 22, C_TEXT);
 	C2D_DrawRectSolid(11, cy + 1, 0.5f, 20, 20, rgba_to_c2d(doc.palette[color]));
 	gfx_text(40, cy + 4, 0.5f, C_TEXT, "Color %d  #%06lX", color + 1, (unsigned long)(doc.palette[color] >> 8));
 
 	// info
-	float iy = cy + 28;
+	float iy = cy + 26;
 	gfx_text(10, iy, 0.42f, C_DIM, "Canvas %dx%d  Zoom %dx  Grid %s", doc.w, doc.h, zoom(), gridOn ? "on" : "off");
 	gfx_text(10, iy + 12, 0.42f, C_DIM, "Frame %d/%d  Mirror %s", doc.curFrame + 1, doc.frameCount, MIRROR_NAMES[mirrorMode]);
 
@@ -816,6 +1196,10 @@ static void draw_top_tools(void)
 		gfx_text(10, 220, 0.5f, C_ACCENT, "%s", status);
 	else if (mode == MODE_PICKER)
 		gfx_text(10, 220, 0.45f, C_DIM, "Pick a color below.  A: OK   B: cancel");
+	else if (tool == TOOL_SELECT)
+		gfx_text(10, 222, 0.42f, C_DIM, "Drag: select / move.  A: actions  B: deselect");
+	else if (tool == TOOL_STAMP)
+		gfx_text(10, 222, 0.42f, C_DIM, "Touch to place, drag to position.  A: pick stamp");
 	else if (is_shape(tool))
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag to draw. Hold ZR to snap, B cancels.");
 	else
@@ -891,24 +1275,71 @@ static void draw_top(void)
 	}
 	else if (mode == MODE_OPTIONS)
 	{
-		OptKind rows[8];
+		OptKind rows[OPT_MAX_ROWS];
 		int n = opt_rows(tool, rows);
-		C2D_DrawRectSolid(40, 40, 0.5f, 320, 40 + n * 22 + 24, C_PANEL);
-		gfx_rect_outline(40, 40, 320, 40 + n * 22 + 24, 1, C_ACCENT);
-		gfx_text(52, 48, 0.6f, C_TEXT, "%s options", TOOL_NAMES[tool]);
-		if (n == 0)
-			gfx_text(52, 76, 0.5f, C_DIM, "No options for this tool");
+		float rh = n > 6 ? 15 : 22, top = n > 6 ? 8 : 40;
+		float ph = 36 + n * rh + 22;
+		C2D_DrawRectSolid(40, top, 0.5f, 320, ph, C_PANEL);
+		gfx_rect_outline(40, top, 320, ph, 1, C_ACCENT);
+		gfx_text(52, top + 6, 0.55f, C_TEXT, "%s %s", TOOL_NAMES[tool], tool == TOOL_SELECT ? "actions" : "options");
+		bool anyAction = false;
 		for (int i = 0; i < n; i++)
 		{
-			float y = 76 + i * 22;
+			float y = top + 30 + i * rh;
+			bool act = rows[i] >= OPT_ACT_FIRST;
+			anyAction |= act;
 			if (i == optSel)
-				C2D_DrawRectSolid(46, y - 3, 0.5f, 308, 20, C_SEL);
-			gfx_text(56, y, 0.52f, i == optSel ? C_ACCENT : C_TEXT, "%s", opt_label(rows[i]));
-			char val[48];
-			opt_value(rows[i], val, sizeof(val));
-			gfx_text(176, y, 0.52f, C_TEXT, "< %s >", val);
+				C2D_DrawRectSolid(46, y - 2, 0.5f, 308, rh - 1, C_SEL);
+			gfx_text(56, y, rh < 20 ? 0.46f : 0.52f, i == optSel ? C_ACCENT : C_TEXT, "%s", opt_label(rows[i]));
+			if (!act)
+			{
+				char val[64];
+				opt_value(rows[i], val, sizeof(val));
+				gfx_text(176, y, 0.52f, C_TEXT, "< %s >", val);
+			}
 		}
-		gfx_text(52, 76 + n * 22 + 6, 0.42f, C_DIM, "Up/Down: option   Left/Right: change   A/B: close");
+		gfx_text(52, top + 30 + n * rh + 4, 0.42f, C_DIM, anyAction ? "Up/Down: choose   A: do it   B: close"
+		                                                               : "Up/Down: option   Left/Right: change   A/B: close");
+	}
+	else if (mode == MODE_EXPORT)
+	{
+		C2D_DrawRectSolid(30, 8, 0.5f, 340, 224, C_PANEL);
+		gfx_rect_outline(30, 8, 340, 224, 1, C_DIM);
+		gfx_text(42, 14, 0.55f, C_TEXT, "Export PNG  (frame %d, %dx%d)", doc.curFrame + 1, doc.w, doc.h);
+		const int visible = 10;
+		int first = exportSel - visible + 2 < 0 ? 0 : exportSel - visible + 2;
+		if (first > EXPORT_ROWS - visible) first = EXPORT_ROWS - visible;
+		for (int r = first; r < first + visible; r++)
+		{
+			float y = 36 + (r - first) * 17;
+			if (r == exportSel)
+				C2D_DrawRectSolid(36, y - 2, 0.5f, 328, 16, C_SEL);
+			u32 c = r == exportSel ? C_ACCENT : C_TEXT;
+			if (r == 0)
+				gfx_text(46, y, 0.48f, c, "%s Recommended  (1x 2x 4x 8x)", export_is_recommended() ? "[x]" : "[  ]");
+			else if (r == EXPORT_ROWS - 1)
+				gfx_text(46, y, 0.48f, c, ">> Export now");
+			else
+			{
+				int i = r - 1, w, h;
+				bool even, ok = export_dims(i, &w, &h, &even);
+				char label[16];
+				if (EXPORT_SIZES[i].mult) snprintf(label, sizeof(label), "%dx", EXPORT_SIZES[i].mult);
+				else snprintf(label, sizeof(label), "%d px", EXPORT_SIZES[i].fixed);
+				gfx_text(46, y, 0.48f, c, "%s %-7s %dx%d%s", exportOn[i] ? "[x]" : "[  ]", label, w, h,
+				         !ok ? "  too big" : !even ? "  (uneven pixels)" : "");
+			}
+		}
+		gfx_text(42, 214, 0.42f, C_DIM, "Up/Down: choose   A: tick / run   B: back");
+	}
+	else if (mode == MODE_SHIFT)
+	{
+		C2D_DrawRectSolid(60, 70, 0.5f, 280, 100, C_PANEL);
+		gfx_rect_outline(60, 70, 280, 100, 1, C_ACCENT);
+		gfx_text(72, 80, 0.55f, C_TEXT, "Shift canvas (wraps around)");
+		gfx_text(72, 104, 0.48f, C_TEXT, "Drag the canvas or use the D-pad.");
+		gfx_text(72, 122, 0.48f, C_DIM, "Offset: %d, %d", shiftX, shiftY);
+		gfx_text(72, 146, 0.45f, C_DIM, "A: keep    B: cancel");
 	}
 	else if (mode == MODE_CONFIRM)
 	{
@@ -935,6 +1366,7 @@ int main(int argc, char* argv[])
 		svcBreak(USERBREAK_PANIC);
 	view_fit();
 	after_doc_change();
+	export_recommended();
 
 	while (running && aptMainLoop())
 	{
@@ -964,6 +1396,8 @@ int main(int argc, char* argv[])
 		}
 		else if (mode == MODE_OPTIONS)
 			update_options(kDown);
+		else if (mode == MODE_SHIFT)
+			update_shift(kDown, kHeld, touch);
 		else
 			update_menus(kDown);
 

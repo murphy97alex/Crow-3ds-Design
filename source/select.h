@@ -1,0 +1,42 @@
+// Selection, floating pixels (move/paste/stamps), clipboard, transforms, canvas shift.
+// Pure C so it can be unit-tested on a PC. Undo is handled here via hist_begin/commit.
+// SPDX-License-Identifier: MIT
+#pragma once
+#include "doc.h"
+
+typedef struct { int x, y, w, h; } Rect;
+
+bool sel_active(void);
+bool sel_floating(void);
+Rect sel_rect(void);                 // selection or floating rect, canvas coords
+bool sel_contains(int x, int y);
+
+void sel_set(Doc* d, int x0, int y0, int x1, int y1); // corners, inclusive; clamped
+void sel_all(Doc* d);
+void sel_clear(Doc* d);              // deselect (drops floating pixels in place)
+void sel_reset(void);                // forget everything (document replaced)
+
+// Floating pixels: lifted from the canvas (move) or pasted/stamped.
+void sel_lift(Doc* d);               // cut the selection into a floating layer
+void sel_move_to(Doc* d, int x, int y);
+void sel_commit(Doc* d);             // drop floating pixels (one undo step); keeps selection rect
+void sel_cancel(Doc* d);             // undo the lift/paste entirely
+void sel_float_pixels(Doc* d, const uint8_t* px, int w, int h, int x, int y);
+
+// Actions (apply to the floating layer, or lift+apply+commit for a plain selection)
+void sel_copy(Doc* d);
+bool sel_has_clip(void);
+void sel_cut(Doc* d);
+void sel_paste(Doc* d, int x, int y);
+void sel_delete(Doc* d);
+void sel_flip(Doc* d, bool horizontal);
+void sel_rotate(Doc* d);             // 90° clockwise
+void sel_outline(Doc* d, uint8_t v); // 1px outline around non-transparent pixels
+
+// Current selection/floating pixels as a standalone buffer (for stamps). Returns false if none.
+bool sel_get_pixels(Doc* d, uint8_t** px, int* w, int* h);
+
+// Shift whole frame with wrap-around: begin, set total offset (repeatable), end.
+void shift_begin(Doc* d);
+void shift_set(Doc* d, int dx, int dy);
+void shift_end(Doc* d, bool keep);

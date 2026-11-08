@@ -171,6 +171,5 @@ const char* pxd_load(Doc* d, const char* path)
 	*d = nd;
 	d->curFrame = 0;
 	d->dirty = false;
-	hist_clear();
 	return NULL;
 }

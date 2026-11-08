@@ -27,3 +27,6 @@ test.pxd
 bad.pxd
 test_pxd
 test_tools
+test_select
+out.png
+st.pxd

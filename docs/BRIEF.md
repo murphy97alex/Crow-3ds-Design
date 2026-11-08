@@ -58,11 +58,12 @@ Stylus in right hand, frequent actions on left.
 - **M0 (done, v0.0.1):** scaffold, CI, releases.
 - **M1 (done, v0.1.0):** canvas, zoom/pan/grid, palette + hex/wheel picker, eyedropper, undo/redo,
   .pxd save/open, size presets.
-- **M2:** brush sizes 1–9 with Square/Round/Dither shapes (pencil, eraser); pixel-perfect pencil
+- **M2 (done, v0.2.0):** brush sizes 1–9 with Square/Round/Dither shapes (pencil, eraser); pixel-perfect pencil
   (size 1); fill (contiguous or replace color); line, rectangle, ellipse (outline/filled, ZR snap,
   2:1 iso lines); mirror drawing (off / left-right / top-bottom / both); A tool options panel.
-- **M3:** select + move, copy/paste, flip/rotate 90°; stamps; outline (1px around selection/art);
-  shift/wrap canvas; PNG export at 1x/2x/4x/8x and multi-size icon export.
+- **M3 (v0.3.0):** select + move, copy/paste, flip/rotate 90°; stamps; outline (1px around selection/art);
+  shift/wrap canvas; PNG export: one checklist of sizes (1x–8x and 16–256 px) with a
+  "Recommended" preset (1x/2x/4x/8x).
 - **Later in v1:** HUD layout grid (every 8/16 px) and 3x3 tile preview; shading tool (step
   lighter/darker along a palette ramp); autosave/recovery; text tool; camera mode; left-handed mode.
 

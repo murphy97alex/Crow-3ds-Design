@@ -9,7 +9,9 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | Stylus on canvas | Use the current tool |
 | Tap a palette swatch | Pick that color; tap the selected one again to edit it (wheel, brightness bar, hex) |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror) |
-| D-pad left/right | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Eyedropper |
+| D-pad left/right | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper |
+| Select tool | Drag to select; drag inside to move; A = actions (copy, cut, paste, delete, flip, rotate, outline, save as stamp); B deselects |
+| Stamp tool | A picks a stamp; touch to place, drag to position |
 | Hold R + stylus | Eyedropper |
 | Hold ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 |
 | B while dragging a shape | Cancel the shape |
@@ -19,9 +21,11 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | X | Grid on/off (zoom 4x and up) |
 | Y | Switch to last-used tool |
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… |
-| START | Menu: new canvas (presets + custom), save, save as, open, exit |
+| START | Menu: new canvas, save, save as, open, export PNG, shift canvas (wrap), exit |
 
-Projects are saved to `/3ds/pixel-ui-designer/projects/*.pxd` ([format](docs/PXD.md)).
+Projects are saved to `/3ds/pixel-ui-designer/projects/*.pxd` ([format](docs/PXD.md)),
+stamps to `/3ds/pixel-ui-designer/stamps/`, and PNG exports to `/3ds/pixel-ui-designer/export/`
+(named `<project>_<W>x<H>.png`) — grab them with ftpd.
 
 ## Install
 In FBI: *Remote Install → Scan QR Code*, then scan this. It always points at the
