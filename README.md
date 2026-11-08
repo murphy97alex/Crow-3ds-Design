@@ -11,17 +11,18 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | START → Linked swatches | Per project. On: editing a swatch also recolors every pixel of that color (like Aseprite's indexed mode). Off by default |
 | Hold R + tap a swatch | Save the current color (e.g. from the eyedropper) into that swatch |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror axis) |
-| D-pad left/right | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper. Last entry **Mirror** opens Mirror On/Off + axis, which applies to all drawing tools and stamps |
+| D-pad up/down | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper. Last entry **Mirror** opens Mirror On/Off + axis, which applies to all drawing tools and stamps |
 | Select tool | Drag to select; drag inside to move; A = actions (copy, cut, paste, delete, flip, rotate, outline, save as stamp); B deselects |
 | Stamp tool | A: pick a stamp, Size Original or Drag to size. Original: touch to place, drag to position. Drag to size: drag a box to scale it (ZR keeps proportions); a tap places it at original size |
 | Hold R + stylus | Eyedropper |
 | Hold ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 |
 | B while dragging a shape | Cancel the shape |
 | L / ZL | Undo / redo |
-| D-pad up/down | Zoom in / out (¼x to 24x) |
+| D-pad right/left | Zoom in / out (¼x to 24x) |
+| B | Toggle eraser (back to your previous tool on the next press). In Select it deselects; while dragging a shape it cancels |
 | Circle pad | Pan |
 | X | Grid on/off (zoom 4x and up) |
-| Y | Switch to last-used tool |
+| Y | Layers menu (coming with the Layers update) |
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… |
 | START | Menu: new canvas, save, save as, open, export PNG, shift canvas (wrap), exit |
 

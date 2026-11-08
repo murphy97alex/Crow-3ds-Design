@@ -12,14 +12,15 @@ Repo: public, MIT. No secrets/keys, only open-licensed fonts/assets, no Nintendo
 - Buttons: commands
 - A (in drawing tools): tool options panel on the top screen (D-pad to change, A/B to close)
 
-## Button layout (draft, not locked)
+## Button layout (updated 2026-11-08)
 Stylus in right hand, frequent actions on left.
 - Touch: draw | L: undo | ZL: redo
-- D-pad L/R: prev/next tool | Up/Down: zoom
-- Circle pad: pan | R (hold): eyedropper
-- A: tool options panel (drawing tools); confirm/place stamp (select/stamp mode) | B: cancel/deselect
-- ZR (hold while dragging a shape): snap — square/circle, lines to 0/45/90° and 2:1 iso
-- X: grid toggle | Y: last-used tool
+- D-pad Up/Down: prev/next tool (the tool list is vertical) | Right/Left: zoom in/out
+- Circle pad: pan | R (hold): eyedropper (R + tap swatch: save color)
+- A: tool options panel (drawing tools); confirm/place (select/stamp) | B: toggle eraser
+  (deselect in Select, cancel while dragging a shape)
+- ZR (hold while dragging a shape/stamp): snap / keep proportions
+- X: grid toggle | Y: layers menu
 - Select: top screen tools <-> preview | Start: menu
 - Settings: left-handed mode mirrors layout
 
@@ -79,8 +80,9 @@ Stylus in right hand, frequent actions on left.
     invert); gradient dither fill; recent colors row; shading tool.
   - **View & guides:** flip view (mirrored preview); HUD layout grid (8/16 px); isometric 2:1 grid;
     3x3 tile preview; autosave/recovery.
-  - **Layers:** add/delete/reorder, hide/lock, opacity-free (pixel art), merge; .pxd layer chunks.
-    Do before the animator.
+  - **Layers (Y opens the layer menu on the top screen):** add/delete, move/reorder, merge down
+    and merge visible, per-layer opacity, hide/lock, and layer folders (groups that collapse;
+    hide/lock/opacity apply to the whole folder); .pxd layer chunks. Do before the animator.
   - **Camera mode** (filters → pixel art), **text tool**, **left-handed mode**.
   - **v2 animator** after layers.
 

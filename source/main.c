@@ -93,6 +93,7 @@ typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE } Action;
 static Doc doc;
 static Mode mode = MODE_DRAW;
 static Tool tool = TOOL_PENCIL, lastTool = TOOL_ERASER;
+static Tool eraserReturn = TOOL_PENCIL;  // where the B eraser toggle goes back to
 static uint32_t curColor;      // the color you draw with (0xRRGGBBAA)
 static int curSwatch = 0;      // swatch it came from, or -1
 static uint8_t strokeValue;    // pixel value for curColor, fixed for the current stroke
@@ -881,10 +882,10 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	if (kDown & KEY_X) gridOn = !gridOn;
 	if (touchTarget == TOUCH_NONE) // no tool changes mid-stroke
 	{
-		if (kDown & KEY_Y) set_tool(lastTool);
-		if (kDown & (KEY_DLEFT | KEY_DRIGHT))
+		if (kDown & KEY_Y) set_status("Y: layers menu - comes with the Layers update");
+		if (kDown & (KEY_DUP | KEY_DDOWN))   // tool list is vertical: up/down picks the tool
 		{
-			listPos = (listPos + TOOL_COUNT + ((kDown & KEY_DRIGHT) ? 1 : -1)) % TOOL_COUNT;
+			listPos = (listPos + TOOL_COUNT + ((kDown & KEY_DDOWN) ? 1 : -1)) % TOOL_COUNT;
 			if (listPos == TOOL_MIRROR)
 			{
 				// Mirror is a setting for all tools: show it, keep drawing with the current tool
@@ -896,8 +897,8 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			set_tool(listPos);
 		}
 	}
-	if (kDown & KEY_DUP) view_zoom(+1);
-	if (kDown & KEY_DDOWN) view_zoom(-1);
+	if (kDown & KEY_DRIGHT) view_zoom(+1);
+	if (kDown & KEY_DLEFT) view_zoom(-1);
 
 	if (touchTarget == TOUCH_NONE)
 	{
@@ -912,10 +913,21 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			sel_clear(&doc);
 			after_doc_change();
 		}
-		if ((kDown & KEY_B) && tool == TOOL_SELECT && sel_active())
+		if (kDown & KEY_B)
 		{
-			sel_clear(&doc);
-			after_doc_change();
+			if (tool == TOOL_SELECT && sel_active())
+			{
+				sel_clear(&doc);
+				after_doc_change();
+			}
+			else if (tool == TOOL_ERASER)
+				set_tool(eraserReturn == TOOL_ERASER ? TOOL_PENCIL : eraserReturn);
+			else
+			{
+				// B toggles the eraser
+				eraserReturn = tool;
+				set_tool(TOOL_ERASER);
+			}
 		}
 	}
 
@@ -1271,7 +1283,7 @@ static void draw_top_tools(void)
 	gfx_text(392 - gfx_text_width(0.5f, name), 4, 0.5f, C_DIM, "%s", name);
 
 	// tool list
-	gfx_text(10, 26, 0.42f, C_DIM, "TOOLS  D-pad < >   A: options");
+	gfx_text(10, 26, 0.42f, C_DIM, "TOOLS  D-pad up/down   A: options");
 	for (int i = 0; i < TOOL_COUNT; i++)
 	{
 		float y = 40 + i * 12;
@@ -1319,7 +1331,7 @@ static void draw_top_tools(void)
 	else if (is_shape(tool))
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag to draw. Hold ZR to snap, B cancels.");
 	else
-		gfx_text(10, 222, 0.42f, C_DIM, "L undo  ZL redo  R eyedrop  X grid  START menu");
+		gfx_text(10, 222, 0.42f, C_DIM, "L undo ZL redo R eyedrop B eraser X grid <> zoom");
 }
 
 static void draw_top_preview(void)
