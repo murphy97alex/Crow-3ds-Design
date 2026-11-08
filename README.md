@@ -7,7 +7,7 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | Input | Action |
 |---|---|
 | Stylus on canvas | Use the current tool |
-| Tap a palette swatch | Pick that color; tap the selected one again to edit it (wheel, brightness bar, hex) |
+| Tap a palette swatch | Pick that color; tap the selected one again to edit it (wheel, brightness bar, hex, or **Palette text** to type a whole palette) |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror) |
 | D-pad left/right | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper |
 | Select tool | Drag to select; drag inside to move; A = actions (copy, cut, paste, delete, flip, rotate, outline, save as stamp); B deselects |
@@ -48,4 +48,4 @@ make cia      # .cia (needs bannertool + makerom on PATH; scripts/fetch-tools.sh
 CI builds every push; pushing a `v*` tag publishes a GitHub release with both files.
 
 ## License
-MIT. Icon, banner and banner sound are original placeholders generated for this repo.
+MIT. The default palette is CC0 ([details](docs/PALETTE.md)). Icon, banner and banner sound are original placeholders generated for this repo.

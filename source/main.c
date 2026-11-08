@@ -946,7 +946,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			{
 				if (slot == color)
 				{
-					picker_open(slot, doc.palette[slot]);
+					picker_open(slot, doc.palette[slot], doc.palette);
 					mode = MODE_PICKER;
 					touchTarget = TOUCH_NONE;
 					return;
@@ -1382,7 +1382,23 @@ int main(int argc, char* argv[])
 			PickResult r = picker_update(kDown, kHeld, touch);
 			if (r != PICK_OPEN)
 			{
-				if (r == PICK_OK && picker_color() != doc.palette[color])
+				if (r == PICK_LIST)
+				{
+					uint32_t cols[DOC_PALETTE_SIZE];
+					int n = picker_list(cols);
+					if (memcmp(cols, doc.palette, n * sizeof(uint32_t)) != 0)
+					{
+						hist_begin(&doc);
+						hist_commit();
+						memcpy(doc.palette, cols, n * sizeof(uint32_t));
+						doc.dirty = true;
+						after_doc_change();
+					}
+					char msg[64];
+					snprintf(msg, sizeof(msg), "Set %d palette color%s", n, n == 1 ? "" : "s");
+					set_status(msg);
+				}
+				else if (r == PICK_OK && picker_color() != doc.palette[color])
 				{
 					hist_begin(&doc);
 					hist_commit();

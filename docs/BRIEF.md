@@ -53,6 +53,8 @@ Stylus in right hand, frequent actions on left.
 - **Project file:** custom binary `.pxd`, one file per project: versioned header, canvas size,
   palette, then a list of frames (compressed indexed pixels). Room to add layers later.
   PNG export is separate.
+- **Default palette:** our own 32 colors, released CC0 (docs/PALETTE.md).
+- **Palette text:** type/paste a list of hex codes to fill palette slots 1, 2, 3… at once.
 
 ## Roadmap
 - **M0 (done, v0.0.1):** scaffold, CI, releases.
@@ -68,7 +70,6 @@ Stylus in right hand, frequent actions on left.
   lighter/darker along a palette ramp); autosave/recovery; text tool; camera mode; left-handed mode.
 
 ## Open questions
-- Default starting palette (needs an open-licensed choice)
 - `.pxd` details (compression, where saves live on SD) — Claude decides, documents in docs/
 
 ## Later

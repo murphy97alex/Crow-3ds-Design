@@ -3,18 +3,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Placeholder starting palette (original, not from any published palette):
-// grays, then ramps of red, orange, yellow, green, teal, blue, purple, pink, brown.
+// Default palette for new projects. Original to this project and released under CC0 1.0
+// (see docs/PALETTE.md). Row 1: grays, skin/browns, reds, oranges/yellows.
+// Row 2: greens, teals, blues, purples, pinks.
 const uint32_t DOC_DEFAULT_PALETTE[DOC_PALETTE_SIZE] = {
-	0x000000FF, 0x3A3A44FF, 0x6E6E7AFF, 0xA8A8B4FF, 0xDCDCE4FF, 0xFFFFFFFF,
-	0x5A1A1EFF, 0xA82A2AFF, 0xE8463CFF, 0xFF8C78FF,
-	0xB85A14FF, 0xF08C28FF, 0xFFC864FF,
-	0xC8A01EFF, 0xF8E040FF, 0xFFF4A0FF,
-	0x1E5A28FF, 0x3C9A3CFF, 0x78D25AFF, 0xC4F096FF,
-	0x16626AFF, 0x28B4B4FF, 0x8CF0E6FF,
-	0x1E2C78FF, 0x3060D0FF, 0x64A8FFFF,
-	0x4A2478FF, 0x8C46C8FF, 0xC896F0FF,
-	0xD2508CFF, 0x6E4628FF, 0xB48250FF,
+	0x000000FF, 0x2B2C34FF, 0x565966FF, 0x8B8E9BFF, 0xC3C6CFFF, 0xFFFFFFFF,
+	0x3E2618FF, 0x7A4A2CFF, 0xC07E50FF, 0xF0C29AFF,
+	0x6E1A26FF, 0xC02C34FF, 0xF2604CFF,
+	0xE88A24FF, 0xF8C838FF, 0xFFF29AFF,
+	0x1C4A2EFF, 0x2E8A3EFF, 0x6CC650FF, 0xC6EE8EFF,
+	0x145A66FF, 0x22A6B0FF, 0x7CE8E6FF,
+	0x1A2050FF, 0x2A4CB0FF, 0x3E8AF0FF, 0x9CCCFFFF,
+	0x3E1E5CFF, 0x7A3EB4FF, 0xC08AF0FF,
+	0xB8307EFF, 0xF27AB8FF,
 };
 
 bool doc_new(Doc* d, int w, int h)

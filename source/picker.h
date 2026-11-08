@@ -4,9 +4,12 @@
 #include <3ds.h>
 #include <stdint.h>
 
-typedef enum { PICK_OPEN, PICK_OK, PICK_CANCEL } PickResult;
+typedef enum { PICK_OPEN, PICK_OK, PICK_CANCEL, PICK_LIST } PickResult;
 
-void picker_open(int slot, uint32_t rgba);
+void picker_open(int slot, uint32_t rgba, const uint32_t* palette);
 PickResult picker_update(u32 kDown, u32 kHeld, touchPosition touch);
 void picker_draw(void);          // bottom screen
 uint32_t picker_color(void);
+
+// After PICK_LIST: colors typed for slots 1..n (n <= 32).
+int picker_list(uint32_t* out);
