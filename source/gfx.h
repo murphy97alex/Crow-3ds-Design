@@ -4,8 +4,6 @@
 #include <citro2d.h>
 #include "doc.h"
 
-#define WHEEL_D 160 // color wheel diameter in pixels
-
 bool gfx_init(void);
 void gfx_fini(void);
 void gfx_frame_begin(void);  // resets the per-frame text buffer
@@ -19,10 +17,6 @@ void gfx_draw_canvas(const Doc* d, float x, float y, float scale, float clipY0, 
 
 // Checkerboard rectangle, cell = checker square size in screen pixels.
 void gfx_draw_checker(float x, float y, float w, float h, float cell);
-
-// Hue/saturation wheel at brightness v.
-void gfx_wheel_build(float v);
-void gfx_draw_wheel(float x, float y);
 
 void gfx_text(float x, float y, float scale, u32 color, const char* fmt, ...)
 	__attribute__((format(printf, 5, 6)));

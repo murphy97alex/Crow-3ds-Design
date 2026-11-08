@@ -2,31 +2,35 @@
 #include "picker.h"
 #include "color.h"
 #include "gfx.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
-#define WHEEL_X 8
-#define WHEEL_Y 44
-#define SLIDER_X 184
-#define SLIDER_Y 44
-#define SLIDER_W 24
-#define SLIDER_H 160
-#define COL_X 220
-#define COL_W 92
-#define BTN_H 24
-#define BTN_HEX_Y 108
-#define BTN_LIST_Y 136
-#define BTN_OK_Y 172
+// Layout (bottom screen 320x240)
+#define SQ_X 8        // saturation (x) / brightness (y) square
+#define SQ_Y 22
+#define SQ_W 200
+#define SQ_H 150
+#define HUE_Y 178     // hue bar
+#define HUE_H 16
+#define SWATCH_Y 202  // project palette, 2 rows of 16
+#define SWATCH_H 15
+#define COL_X 216     // right column
+#define COL_W 96
+#define PREV_Y 22
+#define BTN_HEX_Y 100
+#define BTN_LIST_Y 126
+#define BTN_SMALL_H 22
+#define BTN_OK_Y 166
 #define BTN_CANCEL_Y 200
+#define BTN_H 28
 
-enum { DRAG_NONE, DRAG_WHEEL, DRAG_SLIDER };
+enum { DRAG_NONE, DRAG_SQUARE, DRAG_HUE };
 
 static int slot;
 static uint32_t oldColor;
 static float hue, sat, val;
-static float wheelVal = -1; // brightness the wheel texture was built with
 static int drag;
 static uint32_t pal[32];
 static uint32_t listColors[32];
@@ -49,6 +53,18 @@ void picker_open(int s, uint32_t rgba, const uint32_t* palette)
 static bool in_rect(touchPosition t, int x, int y, int w, int h)
 {
 	return t.px >= x && t.px < x + w && t.py >= y && t.py < y + h;
+}
+
+static float clampf(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+// Keep hue/saturation when a palette color is gray or black.
+static void set_rgba(uint32_t c)
+{
+	float h, s, v;
+	rgba_to_hsv(c, &h, &s, &v);
+	if (s > 0 && v > 0) hue = h;
+	if (v > 0) sat = s;
+	val = v;
 }
 
 static void ask_hex(void)
@@ -81,7 +97,7 @@ static void ask_hex(void)
 	}
 	else
 		return;
-	rgba_to_hsv(((uint32_t)v << 8) | 0xFF, &hue, &sat, &val);
+	set_rgba(((uint32_t)v << 8) | 0xFF);
 }
 
 int picker_list(uint32_t* out)
@@ -141,13 +157,20 @@ PickResult picker_update(u32 kDown, u32 kHeld, touchPosition t)
 	if (kDown & KEY_TOUCH)
 	{
 		drag = DRAG_NONE;
-		if (in_rect(t, WHEEL_X, WHEEL_Y, WHEEL_D, WHEEL_D))
-			drag = DRAG_WHEEL;
-		else if (in_rect(t, SLIDER_X - 6, SLIDER_Y - 6, SLIDER_W + 12, SLIDER_H + 12))
-			drag = DRAG_SLIDER;
-		else if (in_rect(t, COL_X, BTN_HEX_Y, COL_W, BTN_H))
+		if (in_rect(t, SQ_X - 6, SQ_Y - 6, SQ_W + 12, SQ_H + 8))
+			drag = DRAG_SQUARE;
+		else if (in_rect(t, SQ_X - 6, HUE_Y - 4, SQ_W + 12, HUE_H + 8))
+			drag = DRAG_HUE;
+		else if (in_rect(t, SQ_X, SWATCH_Y, SQ_W, SWATCH_H * 2))
+		{
+			int i = (int)((t.py - SWATCH_Y) / SWATCH_H) * 16 + (int)((t.px - SQ_X) / (SQ_W / 16.0f));
+			if (i >= 0 && i < 32) set_rgba(pal[i]);
+		}
+		else if (in_rect(t, COL_X, PREV_Y, COL_W, 20))
+			set_rgba(oldColor);  // tap the old color to go back to it
+		else if (in_rect(t, COL_X, BTN_HEX_Y, COL_W, BTN_SMALL_H))
 			ask_hex();
-		else if (in_rect(t, COL_X, BTN_LIST_Y, COL_W, BTN_H))
+		else if (in_rect(t, COL_X, BTN_LIST_Y, COL_W, BTN_SMALL_H))
 		{
 			if (ask_list())
 				return PICK_LIST;
@@ -160,67 +183,80 @@ PickResult picker_update(u32 kDown, u32 kHeld, touchPosition t)
 	if (!(kHeld & KEY_TOUCH))
 		drag = DRAG_NONE;
 
-	if (drag == DRAG_WHEEL)
+	if (drag == DRAG_SQUARE)
 	{
-		float r = WHEEL_D / 2.0f;
-		float dx = t.px - (WHEEL_X + r), dy = t.py - (WHEEL_Y + r);
-		float dist = sqrtf(dx * dx + dy * dy);
-		hue = atan2f(-dy, dx) * (180.0f / (float)M_PI);
-		if (hue < 0) hue += 360.0f;
-		sat = dist >= r ? 1.0f : dist / r;
+		sat = clampf((t.px - SQ_X) / (float)SQ_W);
+		val = 1.0f - clampf((t.py - SQ_Y) / (float)SQ_H);
 	}
-	else if (drag == DRAG_SLIDER)
-	{
-		float v = 1.0f - (t.py - SLIDER_Y) / (float)SLIDER_H;
-		val = v < 0 ? 0 : v > 1 ? 1 : v;
-	}
+	else if (drag == DRAG_HUE)
+		hue = clampf((t.px - SQ_X) / (float)SQ_W) * 359.9f;
 	return PICK_OPEN;
 }
 
-static void button(int y, const char* label, u32 bg)
+static void button(int y, int h, const char* label, u32 bg)
 {
-	C2D_DrawRectSolid(COL_X, y, 0.5f, COL_W, BTN_H, bg);
-	float w = gfx_text_width(0.55f, label);
-	gfx_text(COL_X + (COL_W - w) / 2, y + 4, 0.55f, C2D_Color32(255, 255, 255, 255), "%s", label);
+	C2D_DrawRectSolid(COL_X, y, 0.5f, COL_W, h, bg);
+	float w = gfx_text_width(0.5f, label);
+	gfx_text(COL_X + (COL_W - w) / 2, y + (h - 14) / 2, 0.5f, C2D_Color32(255, 255, 255, 255), "%s", label);
+}
+
+static void ring(float x, float y, u32 fill)
+{
+	C2D_DrawCircleSolid(x, y, 0.5f, 7, C2D_Color32(0, 0, 0, 255));
+	C2D_DrawCircleSolid(x, y, 0.5f, 6, C2D_Color32(255, 255, 255, 255));
+	C2D_DrawCircleSolid(x, y, 0.5f, 4, fill);
 }
 
 void picker_draw(void)
 {
-	if (wheelVal != val)
-	{
-		gfx_wheel_build(val);
-		wheelVal = val;
-	}
 	u32 white = C2D_Color32(255, 255, 255, 255), black = C2D_Color32(0, 0, 0, 255);
+	u32 frame = C2D_Color32(90, 94, 104, 255);
 	u32 c = current();
 
-	gfx_text(8, 8, 0.6f, white, "Color %d", slot + 1);
-	gfx_text(8, 24, 0.45f, C2D_Color32(170, 175, 190, 255), "Wheel: hue/saturation   Bar: brightness");
+	gfx_text(8, 4, 0.5f, white, "Color %d", slot + 1);
 
-	gfx_draw_wheel(WHEEL_X, WHEEL_Y);
-	float r = WHEEL_D / 2.0f, a = hue * (float)M_PI / 180.0f;
-	float mx = WHEEL_X + r + cosf(a) * sat * r, my = WHEEL_Y + r - sinf(a) * sat * r;
-	C2D_DrawCircleSolid(mx, my, 0.5f, 6, black);
-	C2D_DrawCircleSolid(mx, my, 0.5f, 4, white);
-	C2D_DrawCircleSolid(mx, my, 0.5f, 3, rgba_to_c2d(c));
+	// saturation/brightness square: white -> hue across, then fade to black downward
+	u32 pure = rgba_to_c2d(hsv_to_rgba(hue, 1, 1));
+	C2D_DrawRectangle(SQ_X, SQ_Y, 0.5f, SQ_W, SQ_H, white, pure, white, pure);
+	C2D_DrawRectangle(SQ_X, SQ_Y, 0.5f, SQ_W, SQ_H, C2D_Color32(0, 0, 0, 0), C2D_Color32(0, 0, 0, 0), black, black);
+	gfx_rect_outline(SQ_X - 1, SQ_Y - 1, SQ_W + 2, SQ_H + 2, 1, frame);
+	ring(SQ_X + sat * SQ_W, SQ_Y + (1 - val) * SQ_H, rgba_to_c2d(c));
 
-	u32 top = rgba_to_c2d(hsv_to_rgba(hue, sat, 1.0f));
-	C2D_DrawRectangle(SLIDER_X, SLIDER_Y, 0.5f, SLIDER_W, SLIDER_H, top, top, black, black);
-	gfx_rect_outline(SLIDER_X - 1, SLIDER_Y - 1, SLIDER_W + 2, SLIDER_H + 2, 1, C2D_Color32(90, 94, 104, 255));
-	float sy = SLIDER_Y + (1.0f - val) * SLIDER_H;
-	C2D_DrawRectSolid(SLIDER_X - 4, sy - 2, 0.5f, SLIDER_W + 8, 4, white);
-	C2D_DrawRectSolid(SLIDER_X - 3, sy - 1, 0.5f, SLIDER_W + 6, 2, black);
+	// hue bar
+	for (int i = 0; i < 6; i++)
+	{
+		u32 a = rgba_to_c2d(hsv_to_rgba(i * 60.0f, 1, 1)), b = rgba_to_c2d(hsv_to_rgba((i + 1) * 60.0f, 1, 1));
+		C2D_DrawRectangle(SQ_X + i * SQ_W / 6.0f, HUE_Y, 0.5f, SQ_W / 6.0f + 0.5f, HUE_H, a, b, a, b);
+	}
+	gfx_rect_outline(SQ_X - 1, HUE_Y - 1, SQ_W + 2, HUE_H + 2, 1, frame);
+	float hx = SQ_X + hue / 360.0f * SQ_W;
+	C2D_DrawRectSolid(hx - 3, HUE_Y - 3, 0.5f, 6, HUE_H + 6, black);
+	C2D_DrawRectSolid(hx - 2, HUE_Y - 2, 0.5f, 4, HUE_H + 4, white);
+	C2D_DrawRectSolid(hx - 1, HUE_Y, 0.5f, 2, HUE_H, pure);
 
-	gfx_draw_checker(COL_X, WHEEL_Y, COL_W, 40, 4);
-	C2D_DrawRectSolid(COL_X, WHEEL_Y, 0.5f, COL_W, 20, rgba_to_c2d(oldColor));
-	C2D_DrawRectSolid(COL_X, WHEEL_Y + 20, 0.5f, COL_W, 20, rgba_to_c2d(c));
-	gfx_rect_outline(COL_X, WHEEL_Y, COL_W, 40, 1, white);
-	gfx_text(COL_X, WHEEL_Y + 46, 0.6f, white, "#%06lX", (unsigned long)(c >> 8));
+	// project palette for quick picks
+	for (int i = 0; i < 32; i++)
+	{
+		float x = SQ_X + (i % 16) * (SQ_W / 16.0f), y = SWATCH_Y + (i / 16) * SWATCH_H;
+		C2D_DrawRectSolid(x + 0.5f, y + 0.5f, 0.5f, SQ_W / 16.0f - 1, SWATCH_H - 1, rgba_to_c2d(pal[i]));
+	}
+
+	// old / new
+	gfx_draw_checker(COL_X, PREV_Y, COL_W, 40, 4);
+	C2D_DrawRectSolid(COL_X, PREV_Y, 0.5f, COL_W, 20, rgba_to_c2d(oldColor));
+	C2D_DrawRectSolid(COL_X, PREV_Y + 20, 0.5f, COL_W, 20, rgba_to_c2d(c));
+	gfx_rect_outline(COL_X, PREV_Y, COL_W, 40, 1, white);
+	gfx_text(COL_X + 2, PREV_Y + 3, 0.38f, (oldColor >> 8) > 0x808080 ? black : white, "old");
+	gfx_text(COL_X + 2, PREV_Y + 23, 0.38f, (c >> 8) > 0x808080 ? black : white, "new");
+	gfx_text(COL_X, 66, 0.6f, white, "#%06lX", (unsigned long)(c >> 8));
+	gfx_text(COL_X, 84, 0.42f, C2D_Color32(170, 175, 190, 255), "R%lu G%lu B%lu",
+	         (unsigned long)(c >> 24), (unsigned long)((c >> 16) & 255), (unsigned long)((c >> 8) & 255));
+
+	button(BTN_HEX_Y, BTN_SMALL_H, "Hex...", C2D_Color32(70, 74, 90, 255));
+	button(BTN_LIST_Y, BTN_SMALL_H, "Palette text...", C2D_Color32(70, 74, 90, 255));
+	button(BTN_OK_Y, BTN_H, "OK (A)", C2D_Color32(40, 120, 70, 255));
+	button(BTN_CANCEL_Y, BTN_H, "Cancel (B)", C2D_Color32(120, 50, 50, 255));
+
 	if (listError)
-		gfx_text(8, 222, 0.45f, C2D_Color32(255, 120, 100, 255), "Palette text: %s", listError);
-
-	button(BTN_HEX_Y, "Hex...", C2D_Color32(70, 74, 90, 255));
-	button(BTN_LIST_Y, "Palette text...", C2D_Color32(70, 74, 90, 255));
-	button(BTN_OK_Y, "OK (A)", C2D_Color32(40, 120, 70, 255));
-	button(BTN_CANCEL_Y, "Cancel (B)", C2D_Color32(120, 50, 50, 255));
+		gfx_text(60, 4, 0.42f, C2D_Color32(255, 120, 100, 255), "%s", listError);
 }

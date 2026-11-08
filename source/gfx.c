@@ -6,9 +6,8 @@
 
 #define CANVAS_TEX_W 512
 #define CANVAS_TEX_H 256
-#define WHEEL_TEX 256
 
-static C3D_Tex canvasTex, checkerTex, wheelTex;
+static C3D_Tex canvasTex, checkerTex;
 static bool canvasDirty;
 static C2D_TextBuf textBuf;
 
@@ -22,15 +21,12 @@ static inline u32 tiled(u32 x, u32 y, u32 w)
 bool gfx_init(void)
 {
 	if (!C3D_TexInit(&canvasTex, CANVAS_TEX_W, CANVAS_TEX_H, GPU_RGBA8) ||
-	    !C3D_TexInit(&checkerTex, 8, 8, GPU_RGBA8) ||
-	    !C3D_TexInit(&wheelTex, WHEEL_TEX, WHEEL_TEX, GPU_RGBA8))
+	    !C3D_TexInit(&checkerTex, 8, 8, GPU_RGBA8))
 		return false;
 	C3D_TexSetFilter(&canvasTex, GPU_NEAREST, GPU_NEAREST);
 	C3D_TexSetWrap(&canvasTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 	C3D_TexSetFilter(&checkerTex, GPU_NEAREST, GPU_NEAREST);
 	C3D_TexSetWrap(&checkerTex, GPU_REPEAT, GPU_REPEAT);
-	C3D_TexSetFilter(&wheelTex, GPU_LINEAR, GPU_LINEAR);
-	C3D_TexSetWrap(&wheelTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
 	// 8x8 texture = 2x2 checker cells of 4 texels
 	u32* c = (u32*)checkerTex.data;
@@ -48,7 +44,6 @@ void gfx_fini(void)
 	C2D_TextBufDelete(textBuf);
 	C3D_TexDelete(&canvasTex);
 	C3D_TexDelete(&checkerTex);
-	C3D_TexDelete(&wheelTex);
 }
 
 void gfx_frame_begin(void) { C2D_TextBufClear(textBuf); }
@@ -115,33 +110,6 @@ void gfx_draw_canvas(const Doc* d, float x, float y, float scale, float clipY0, 
 	float u0 = (x0 - x) / scale / CANVAS_TEX_W, u1 = (x1 - x) / scale / CANVAS_TEX_W;
 	float v0 = (y0 - y) / scale / CANVAS_TEX_H, v1 = (y1 - y) / scale / CANVAS_TEX_H;
 	draw_tex(&canvasTex, x0, y0, x1 - x0, y1 - y0, u0, v0, u1, v1);
-}
-
-void gfx_wheel_build(float v)
-{
-	u32* t = (u32*)wheelTex.data;
-	const float r = WHEEL_D / 2.0f;
-	for (int y = 0; y < WHEEL_D; y++)
-		for (int x = 0; x < WHEEL_D; x++)
-		{
-			float dx = x + 0.5f - r, dy = y + 0.5f - r;
-			float dist = sqrtf(dx * dx + dy * dy);
-			u32 c = 0;
-			if (dist <= r)
-			{
-				float hue = atan2f(-dy, dx) * (180.0f / (float)M_PI);
-				if (hue < 0) hue += 360.0f;
-				c = hsv_to_rgba(hue, dist / r, v);
-			}
-			t[tiled(x, y, WHEEL_TEX)] = c;
-		}
-	C3D_TexFlush(&wheelTex);
-}
-
-void gfx_draw_wheel(float x, float y)
-{
-	draw_tex(&wheelTex, x, y, WHEEL_D, WHEEL_D, 0, 0,
-	         (float)WHEEL_D / WHEEL_TEX, (float)WHEEL_D / WHEEL_TEX);
 }
 
 void gfx_text(float x, float y, float scale, u32 color, const char* fmt, ...)
