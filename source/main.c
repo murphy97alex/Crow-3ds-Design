@@ -613,8 +613,9 @@ static void run_action(Action a)
 // ---- menus ---------------------------------------------------------------------
 
 static const char* MENU_ITEMS[] = { "Back to canvas", "New canvas", "Save", "Save as...", "Open...",
-                                    "Export PNG...", "Shift canvas (wrap)...", "Exit" };
-#define MENU_COUNT 8
+                                    "Export PNG...", "Shift canvas (wrap)...", "Linked swatches", "Exit" };
+#define MENU_COUNT 9
+#define MENU_LINKED 7
 
 // ---- PNG export ------------------------------------------------------------------
 
@@ -756,7 +757,13 @@ static void update_menus(u32 kDown)
 				shiftX = shiftY = 0;
 				mode = MODE_SHIFT;
 				break;
-			case 7:
+			case MENU_LINKED:
+				doc.linkedSwatches = !doc.linkedSwatches;
+				doc.dirty = true;
+				set_status(doc.linkedSwatches ? "Linked: editing a swatch recolors the drawing"
+				                              : "Unlinked: swatches are just saved colors");
+				break;
+			case 8:
 				if (doc.dirty) confirm(ACT_EXIT, "Exit without saving?");
 				else running = false;
 				break;
@@ -973,7 +980,9 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				}
 				if (slot == curSwatch && curColor == doc.swatches[slot])
 				{
+					finish_floating();   // recoloring renumbers pixels; nothing may be floating
 					picker_open(slot, curColor, doc.swatches);
+					picker_set_linked(doc.linkedSwatches);
 					mode = MODE_PICKER;
 					touchTarget = TOUCH_NONE;
 					return;
@@ -1298,7 +1307,12 @@ static void draw_top(void)
 		draw_top_tools();
 
 	if (mode == MODE_MENU)
-		draw_list("Menu", MENU_ITEMS, MENU_COUNT, menuSel, "");
+	{
+		const char* items[MENU_COUNT];
+		memcpy(items, MENU_ITEMS, sizeof(items));
+		items[MENU_LINKED] = doc.linkedSwatches ? "Linked swatches: On" : "Linked swatches: Off";
+		draw_list("Menu", items, MENU_COUNT, menuSel, "");
+	}
 	else if (mode == MODE_NEW)
 	{
 		const char* labels[PRESET_COUNT];
@@ -1425,6 +1439,12 @@ int main(int argc, char* argv[])
 				{
 					uint32_t cols[DOC_PALETTE_SIZE];
 					int n = picker_list(cols);
+					if (doc.linkedSwatches)
+					{
+						hist_begin(&doc);
+						if (doc_recolor(&doc, doc.swatches, cols, n)) { hist_commit(); after_doc_change(); }
+						else hist_abort();
+					}
 					memcpy(doc.swatches, cols, n * sizeof(uint32_t));
 					if (curSwatch >= 0 && curSwatch < n)
 						curColor = doc.swatches[curSwatch];
@@ -1439,6 +1459,12 @@ int main(int argc, char* argv[])
 					curColor = picker_color();
 					if (curSwatch >= 0 && doc.swatches[curSwatch] != curColor)
 					{
+						if (doc.linkedSwatches)
+						{
+							hist_begin(&doc);
+							if (doc_recolor(&doc, &doc.swatches[curSwatch], &curColor, 1)) { hist_commit(); after_doc_change(); }
+							else hist_abort();
+						}
 						doc.swatches[curSwatch] = curColor;
 						doc.dirty = true;
 					}

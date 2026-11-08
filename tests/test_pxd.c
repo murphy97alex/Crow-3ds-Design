@@ -30,6 +30,25 @@ int main(void)
 	for (int x = 0; x < 4; x++) assert(doc_color(&e, e.frames[0][x]) == 0x00000AFF + ((uint32_t)(296 + x) << 8));
 	doc_free(&e);
 
+	// recolor: swap two colors at once, then merge into an existing color
+	{
+		Doc r = {0}; doc_new(&r, 3, 1);
+		uint8_t A = doc_color_index(&r, 0xFF0000FF, true), B = doc_color_index(&r, 0x0000FFFF, true);
+		r.frames[0][0] = A; r.frames[0][1] = B; r.frames[0][2] = 0;
+		uint32_t from[2] = { 0xFF0000FF, 0x0000FFFF }, to[2] = { 0x0000FFFF, 0xFF0000FF };
+		assert(doc_recolor(&r, from, to, 2));
+		assert(doc_color(&r, r.frames[0][0]) == 0x0000FFFF && doc_color(&r, r.frames[0][1]) == 0xFF0000FF);
+		uint32_t f2 = 0x0000FFFF, t2 = 0xFF0000FF;   // now both pixels red -> same entry
+		assert(doc_recolor(&r, &f2, &t2, 1));
+		assert(r.frames[0][0] == r.frames[0][1] && doc_color(&r, r.frames[0][0]) == 0xFF0000FF);
+		uint32_t f3 = 0x00FF00FF, t3 = 0x123456FF;   // color not in drawing
+		assert(!doc_recolor(&r, &f3, &t3, 1));
+		r.linkedSwatches = true;
+		assert(pxd_save(&r, "lk.pxd") == NULL);
+		Doc q = {0}; assert(pxd_load(&q, "lk.pxd") == NULL && q.linkedSwatches);
+		doc_free(&q); doc_free(&r);
+	}
+
 	// version 1 file: 32-entry palette is both color table and swatches
 	{
 		FILE* f = fopen("v1.pxd", "wb");

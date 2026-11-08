@@ -68,7 +68,7 @@ const char* pxd_save(const Doc* d, const char* path)
 	put16(head + 4, d->h);
 	put16(head + 6, d->frameCount);
 	put16(head + 8, d->fps);
-	put16(head + 10, 0); // flags
+	put16(head + 10, d->linkedSwatches ? 1 : 0); // flags: bit 0 = linked swatches
 	ok = ok && write_chunk(f, "HEAD", head, sizeof(head));
 
 	uint8_t pal[DOC_MAX_COLORS * 4];
@@ -133,6 +133,7 @@ const char* pxd_load(Doc* d, const char* path)
 			nd.h = get16(body + 4);
 			expectFrames = get16(body + 6);
 			nd.fps = get16(body + 8);
+			nd.linkedSwatches = get16(body + 10) & 1;
 			if (nd.w < 1 || nd.h < 1 || nd.w > DOC_MAX_W || nd.h > DOC_MAX_H ||
 			    expectFrames < 1 || expectFrames > DOC_MAX_FRAMES)
 				{ err = "Unsupported size"; break; }

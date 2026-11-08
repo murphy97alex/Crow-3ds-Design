@@ -8,6 +8,7 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 |---|---|
 | Stylus on canvas | Use the current tool |
 | Tap a swatch | Draw with that color; tap the selected one again to edit it (color square + hue bar, hex, or **Palette text** to type all swatches). Editing a swatch never changes the drawing |
+| START → Linked swatches | Per project. On: editing a swatch also recolors every pixel of that color (like Aseprite's indexed mode). Off by default |
 | Hold R + tap a swatch | Save the current color (e.g. from the eyedropper) into that swatch |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror) |
 | D-pad left/right | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper |

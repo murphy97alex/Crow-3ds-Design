@@ -24,6 +24,7 @@ typedef struct {
 	int frameCount;
 	int curFrame;
 	uint8_t* frames[DOC_MAX_FRAMES];      // each w*h bytes
+	bool linkedSwatches;                  // editing a swatch also recolors matching pixels
 	char name[DOC_NAME_MAX];              // "" = never saved
 	bool dirty;
 } Doc;
@@ -48,6 +49,10 @@ static inline uint32_t doc_color(const Doc* d, uint8_t v)
 // while other code holds copies of pixel values); otherwise the nearest existing color is used.
 uint8_t doc_color_index(Doc* d, uint32_t rgba, bool allowCompact);
 void doc_compact(Doc* d);
+
+// Change every pixel of color from[i] to to[i] (all at once, so swaps work). Returns true if
+// anything changed. Renumbers nothing: merged entries are left unused until the next compact.
+bool doc_recolor(Doc* d, const uint32_t* from, const uint32_t* to, int n);
 
 // Undo/redo: whole-frame + color table snapshots, taken before each edit.
 void hist_clear(void);

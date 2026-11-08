@@ -89,6 +89,41 @@ uint8_t doc_color_index(Doc* d, uint32_t rgba, bool allowCompact)
 	return best;
 }
 
+bool doc_recolor(Doc* d, const uint32_t* from, const uint32_t* to, int n)
+{
+	bool changed = false;
+	int count = d->colorCount;
+	uint32_t orig[DOC_MAX_COLORS + 1];
+	memcpy(orig, d->colors, sizeof(orig));
+	for (int v = 1; v <= count; v++)
+		for (int i = 0; i < n; i++)
+			if (orig[v] == (from[i] | 0xFF) && from[i] != to[i])
+			{
+				d->colors[v] = to[i] | 0xFF;
+				changed = true;
+				break;
+			}
+	if (!changed)
+		return false;
+	// merge entries that now hold the same color
+	uint8_t remap[DOC_MAX_COLORS + 1];
+	bool needRemap = false;
+	for (int v = 0; v <= count; v++)
+	{
+		remap[v] = v;
+		for (int u = 1; u < v; u++)
+			if (remap[u] == u && d->colors[u] == d->colors[v]) { remap[v] = u; needRemap = true; break; }
+	}
+	if (needRemap)
+	{
+		size_t np = (size_t)d->w * d->h;
+		for (int f = 0; f < d->frameCount; f++)
+			for (size_t i = 0; i < np; i++)
+				d->frames[f][i] = remap[d->frames[f][i]];
+	}
+	return true;
+}
+
 void doc_free(Doc* d)
 {
 	for (int i = 0; i < DOC_MAX_FRAMES; i++)

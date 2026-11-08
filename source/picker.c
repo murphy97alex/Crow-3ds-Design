@@ -36,6 +36,9 @@ static uint32_t pal[32];
 static uint32_t listColors[32];
 static int listCount;
 static const char* listError;
+static bool linkedNote;
+
+void picker_set_linked(bool linked) { linkedNote = linked; }
 
 static uint32_t current(void) { return hsv_to_rgba(hue, sat, val); }
 uint32_t picker_color(void) { return current(); }
@@ -213,7 +216,9 @@ void picker_draw(void)
 	u32 frame = C2D_Color32(90, 94, 104, 255);
 	u32 c = current();
 
-	gfx_text(8, 4, 0.5f, white, "Color %d", slot + 1);
+	gfx_text(8, 4, 0.5f, white, "Swatch %d", slot + 1);
+	if (linkedNote && !listError)
+		gfx_text(80, 5, 0.42f, C2D_Color32(255, 170, 40, 255), "Linked: the drawing changes too");
 
 	// saturation/brightness square: white -> hue across, then fade to black downward
 	u32 pure = rgba_to_c2d(hsv_to_rgba(hue, 1, 1));

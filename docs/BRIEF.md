@@ -50,7 +50,8 @@ Stylus in right hand, frequent actions on left.
   current color; the 32 swatches are saved colors edited with the square + hue bar picker, hex,
   or palette text. Editing a swatch never changes the drawing. Pixels index a per-project color
   table (up to 255 colors). Eyedropper picks any canvas color; R + tap a swatch saves the current
-  color into it. Recolor on purpose with Fill → Replace color. PNG export is full color.
+  color into it. Recolor on purpose with Fill → Replace color, or turn on **Linked swatches**
+  (START menu, per project) so editing a swatch recolors matching pixels. PNG export is full color.
 - **Crow display:** unknown for now. Design for full color; display-specific export later.
 - **Project file:** custom binary `.pxd`, one file per project: versioned header, canvas size,
   palette, then a list of frames (compressed indexed pixels). Room to add layers later.
