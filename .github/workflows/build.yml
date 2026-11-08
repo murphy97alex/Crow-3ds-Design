@@ -25,6 +25,9 @@ jobs:
           cc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I source \
             tests/test_pxd.c source/pxd.c source/doc.c -o test_pxd
           ./test_pxd
+          cc -Wall -Wextra -Werror -fsanitize=address,undefined -g -I source \
+            tests/test_tools.c source/tools.c source/doc.c -lm -o test_tools
+          ./test_tools
 
   build:
     needs: test

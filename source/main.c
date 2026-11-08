@@ -14,6 +14,7 @@
 #include "gfx.h"
 #include "picker.h"
 #include "pxd.h"
+#include "tools.h"
 
 #define APP_NAME "Pixel UI Designer"
 #define SAVE_ROOT "sdmc:/3ds/pixel-ui-designer"
@@ -40,12 +41,31 @@
 
 // ---- tools -----------------------------------------------------------------
 
-typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
-static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Eyedropper" };
+typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
+static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Line", "Rectangle", "Ellipse", "Eyedropper" };
+
+static bool is_shape(Tool t) { return t == TOOL_LINE || t == TOOL_RECT || t == TOOL_ELLIPSE; }
+
+// per-tool options
+static Brush brushes[TOOL_COUNT] = {
+	[TOOL_PENCIL] = { 1, BRUSH_SQUARE, false }, [TOOL_ERASER] = { 3, BRUSH_SQUARE, false },
+	[TOOL_LINE] = { 1, BRUSH_SQUARE, false },   [TOOL_RECT] = { 1, BRUSH_SQUARE, false },
+	[TOOL_ELLIPSE] = { 1, BRUSH_SQUARE, false },
+};
+static bool shapeFilled[TOOL_COUNT];
+static bool fillReplace;
+static Mirror mirrorMode = MIRROR_OFF;
+
+static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
+static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bottom", "Both" };
+
+// options panel rows
+typedef enum { OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR } OptKind;
+static int optSel;
 
 // ---- app state ---------------------------------------------------------------
 
-typedef enum { MODE_DRAW, MODE_MENU, MODE_NEW, MODE_OPEN, MODE_CONFIRM, MODE_PICKER } Mode;
+typedef enum { MODE_DRAW, MODE_MENU, MODE_NEW, MODE_OPEN, MODE_CONFIRM, MODE_PICKER, MODE_OPTIONS } Mode;
 typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE } Action;
 
 static Doc doc;
@@ -64,8 +84,8 @@ static const int ZOOMS[] = { 1, 2, 3, 4, 6, 8, 12, 16, 24 };
 // touch / stroke
 enum { TOUCH_NONE, TOUCH_CANVAS, TOUCH_STRIP };
 static int touchTarget = TOUCH_NONE;
-static int lastCX, lastCY;
-static bool strokeChanged;
+static int startCX, startCY;   // where the current stroke/shape began
+static bool strokeActive;
 
 // menus
 static int menuSel, newSel, openSel, openCount;
@@ -135,34 +155,6 @@ static void screen_to_canvas(int sx, int sy, int* cx, int* cy)
 
 // ---- editing -------------------------------------------------------------------
 
-static void plot(int x, int y, uint8_t v)
-{
-	if (x < 0 || y < 0 || x >= doc.w || y >= doc.h)
-		return;
-	uint8_t* p = &doc_pixels(&doc)[y * doc.w + x];
-	if (*p == v)
-		return;
-	*p = v;
-	gfx_canvas_set(&doc, x, y);
-	strokeChanged = true;
-}
-
-static void line(int x0, int y0, int x1, int y1, uint8_t v)
-{
-	int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-	int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-	int err = dx + dy;
-	for (;;)
-	{
-		plot(x0, y0, v);
-		if (x0 == x1 && y0 == y1)
-			break;
-		int e2 = 2 * err;
-		if (e2 >= dy) { err += dy; x0 += sx; }
-		if (e2 <= dx) { err += dx; y0 += sy; }
-	}
-}
-
 static void set_tool(Tool t)
 {
 	if (t == tool)
@@ -183,6 +175,117 @@ static void eyedrop(int cx, int cy)
 static void after_doc_change(void)
 {
 	gfx_canvas_rebuild(&doc);
+}
+
+// ---- tool options ----------------------------------------------------------------
+
+static int opt_rows(Tool t, OptKind* rows)
+{
+	int n = 0;
+	switch (t)
+	{
+	case TOOL_PENCIL:
+		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
+	case TOOL_ERASER:
+		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
+	case TOOL_FILL:
+		rows[n++] = OPT_FILLMODE; break;
+	case TOOL_LINE:
+		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
+	case TOOL_RECT:
+	case TOOL_ELLIPSE:
+		rows[n++] = OPT_STYLE; rows[n++] = OPT_SIZE; break;
+	default:
+		break;
+	}
+	if (t != TOOL_EYEDROPPER)
+		rows[n++] = OPT_MIRROR;
+	return n;
+}
+
+static const char* opt_label(OptKind k)
+{
+	switch (k)
+	{
+	case OPT_SIZE: return "Size";
+	case OPT_SHAPE: return "Brush";
+	case OPT_PIXPERF: return "Pixel-perfect";
+	case OPT_STYLE: return "Style";
+	case OPT_FILLMODE: return "Mode";
+	case OPT_MIRROR: return "Mirror";
+	}
+	return "";
+}
+
+static void opt_value(OptKind k, char* out, size_t n)
+{
+	Brush* b = &brushes[tool];
+	switch (k)
+	{
+	case OPT_SIZE: snprintf(out, n, "%d px", b->size); break;
+	case OPT_SHAPE: snprintf(out, n, "%s", SHAPE_NAMES[b->shape]); break;
+	case OPT_PIXPERF: snprintf(out, n, "%s%s", b->pixelPerfect ? "On" : "Off", b->pixelPerfect && b->size > 1 ? " (size 1 only)" : ""); break;
+	case OPT_STYLE: snprintf(out, n, "%s", shapeFilled[tool] ? "Filled" : "Outline"); break;
+	case OPT_FILLMODE: snprintf(out, n, "%s", fillReplace ? "Replace color" : "Connected area"); break;
+	case OPT_MIRROR: snprintf(out, n, "%s", MIRROR_NAMES[mirrorMode]); break;
+	}
+}
+
+static void opt_change(OptKind k, int dir)
+{
+	Brush* b = &brushes[tool];
+	switch (k)
+	{
+	case OPT_SIZE:
+		b->size += dir;
+		if (b->size < 1) b->size = 1;
+		if (b->size > BRUSH_MAX) b->size = BRUSH_MAX;
+		break;
+	case OPT_SHAPE:
+	{
+		int count = tool == TOOL_LINE ? 2 : BRUSH_SHAPE_COUNT; // no dither lines
+		b->shape = (b->shape + count + dir) % count;
+		break;
+	}
+	case OPT_PIXPERF: b->pixelPerfect = !b->pixelPerfect; break;
+	case OPT_STYLE: shapeFilled[tool] = !shapeFilled[tool]; break;
+	case OPT_FILLMODE: fillReplace = !fillReplace; break;
+	case OPT_MIRROR: mirrorMode = (mirrorMode + MIRROR_COUNT + dir) % MIRROR_COUNT; break;
+	}
+}
+
+static void update_options(u32 kDown)
+{
+	OptKind rows[8];
+	int n = opt_rows(tool, rows);
+	if (kDown & (KEY_A | KEY_B)) { mode = MODE_DRAW; return; }
+	if (n == 0) return;
+	if (optSel >= n) optSel = n - 1;
+	if (kDown & KEY_DUP) optSel = (optSel + n - 1) % n;
+	if (kDown & KEY_DDOWN) optSel = (optSel + 1) % n;
+	if (kDown & KEY_DLEFT) opt_change(rows[optSel], -1);
+	if (kDown & KEY_DRIGHT) opt_change(rows[optSel], +1);
+}
+
+// Short summary of the tool's settings for the tool list, e.g. "3 Round".
+static void tool_summary(Tool t, char* out, size_t n)
+{
+	const Brush* b = &brushes[t];
+	switch (t)
+	{
+	case TOOL_PENCIL:
+		snprintf(out, n, "%d %s%s", b->size, SHAPE_NAMES[b->shape], b->pixelPerfect && b->size == 1 ? " PP" : ""); break;
+	case TOOL_ERASER:
+	case TOOL_LINE:
+		snprintf(out, n, "%d %s", b->size, SHAPE_NAMES[b->shape]); break;
+	case TOOL_RECT:
+	case TOOL_ELLIPSE:
+		if (shapeFilled[t]) snprintf(out, n, "Filled");
+		else snprintf(out, n, "Outline %d", b->size);
+		break;
+	case TOOL_FILL: snprintf(out, n, "%s", fillReplace ? "Replace" : "Area"); break;
+	default: out[0] = 0; break;
+	}
 }
 
 // ---- files ---------------------------------------------------------------------
@@ -448,11 +551,15 @@ static void update_menus(u32 kDown)
 static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 {
 	if (kDown & KEY_START) { mode = MODE_MENU; menuSel = 0; return; }
+	if ((kDown & KEY_A) && touchTarget == TOUCH_NONE) { mode = MODE_OPTIONS; optSel = 0; return; }
 	if (kDown & KEY_SELECT) previewMode = !previewMode;
 	if (kDown & KEY_X) gridOn = !gridOn;
-	if (kDown & KEY_Y) set_tool(lastTool);
-	if (kDown & KEY_DLEFT) set_tool((tool + TOOL_COUNT - 1) % TOOL_COUNT);
-	if (kDown & KEY_DRIGHT) set_tool((tool + 1) % TOOL_COUNT);
+	if (touchTarget == TOUCH_NONE) // no tool changes mid-stroke
+	{
+		if (kDown & KEY_Y) set_tool(lastTool);
+		if (kDown & KEY_DLEFT) set_tool((tool + TOOL_COUNT - 1) % TOOL_COUNT);
+		if (kDown & KEY_DRIGHT) set_tool((tool + 1) % TOOL_COUNT);
+	}
 	if (kDown & KEY_DUP) view_zoom(+1);
 	if (kDown & KEY_DDOWN) view_zoom(-1);
 
@@ -473,6 +580,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	}
 
 	bool dropper = (kHeld & KEY_R) || tool == TOOL_EYEDROPPER;
+	uint8_t value = tool == TOOL_ERASER ? PIX_TRANSPARENT : color + 1;
 
 	if (kDown & KEY_TOUCH)
 	{
@@ -497,45 +605,86 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		else
 		{
 			touchTarget = TOUCH_CANVAS;
-			screen_to_canvas(touch.px, touch.py, &lastCX, &lastCY);
+			int cx, cy;
+			screen_to_canvas(touch.px, touch.py, &cx, &cy);
+			startCX = cx;
+			startCY = cy;
 			if (dropper)
-				eyedrop(lastCX, lastCY);
+				eyedrop(cx, cy);
 			else
 			{
 				hist_begin(&doc);
-				strokeChanged = false;
-				plot(lastCX, lastCY, tool == TOOL_ERASER ? PIX_TRANSPARENT : color + 1);
+				tools_begin(&doc, mirrorMode);
+				strokeActive = true;
+				if (tool == TOOL_FILL)
+					tools_fill(cx, cy, color + 1, fillReplace);
+				else if (tool == TOOL_PENCIL || tool == TOOL_ERASER)
+					tools_stroke_start(cx, cy, value, &brushes[tool]);
+				// shapes are drawn below while dragging
 			}
 		}
 	}
-	else if ((kHeld & KEY_TOUCH) && touchTarget == TOUCH_CANVAS)
+
+	if ((kHeld & KEY_TOUCH) && touchTarget == TOUCH_CANVAS)
 	{
 		int cx, cy;
 		screen_to_canvas(touch.px, touch.py, &cx, &cy);
-		if (dropper)
+		if (dropper && !strokeActive)
 			eyedrop(cx, cy);
-		else
-			line(lastCX, lastCY, cx, cy, tool == TOOL_ERASER ? PIX_TRANSPARENT : color + 1);
-		lastCX = cx;
-		lastCY = cy;
+		else if (strokeActive && (tool == TOOL_PENCIL || tool == TOOL_ERASER) && !(kDown & KEY_TOUCH))
+			tools_stroke_to(cx, cy, value, &brushes[tool]);
+		else if (strokeActive && is_shape(tool))
+		{
+			if (kDown & KEY_B)
+			{
+				// cancel the shape
+				tools_restore();
+				hist_abort();
+				strokeActive = false;
+				touchTarget = TOUCH_STRIP; // ignore the rest of this touch
+			}
+			else
+			{
+				tools_restore();
+				bool snap = kHeld & KEY_ZR;
+				if (tool == TOOL_LINE)
+				{
+					if (snap) tools_snap_line(startCX, startCY, &cx, &cy);
+					tools_line(startCX, startCY, cx, cy, value, &brushes[tool]);
+				}
+				else
+				{
+					if (snap) tools_snap_square(startCX, startCY, &cx, &cy);
+					int sz = brushes[tool].size;
+					if (tool == TOOL_RECT)
+						tools_rect(startCX, startCY, cx, cy, value, sz, shapeFilled[tool]);
+					else
+						tools_ellipse(startCX, startCY, cx, cy, value, sz, shapeFilled[tool]);
+				}
+			}
+		}
+		if (strokeActive || (kDown & KEY_B))
+			after_doc_change();
 	}
+	else if ((kDown & KEY_TOUCH) && strokeActive)
+		after_doc_change();
 
 	if ((kUp & KEY_TOUCH) || !(kHeld & KEY_TOUCH))
 	{
-		if (touchTarget == TOUCH_CANVAS)
+		if (touchTarget == TOUCH_CANVAS && strokeActive)
 		{
-			if (strokeChanged)
+			if (tools_changed())
 			{
 				hist_commit();
 				doc.dirty = true;
 			}
 			else
 				hist_abort();
-			strokeChanged = false;
-			// one-shot eyedropper tool returns to the previous tool
-			if (tool == TOOL_EYEDROPPER && !(kHeld & KEY_R))
-				set_tool(lastTool);
+			after_doc_change();
 		}
+		if (touchTarget == TOUCH_CANVAS && tool == TOOL_EYEDROPPER && !(kHeld & KEY_R))
+			set_tool(lastTool); // one-shot eyedropper tool returns to the previous tool
+		strokeActive = false;
 		touchTarget = TOUCH_NONE;
 	}
 }
@@ -583,6 +732,20 @@ static void draw_bottom(void)
 		C2D_DrawRectSolid(bx + bw - 1, vy0, 0.5f, 1, vy1 - vy0, bc);
 	}
 
+	// mirror guides
+	if (mirrorMode != MIRROR_OFF)
+	{
+		u32 mc = C2D_Color32(0xFF, 0x50, 0xC8, 0xB0);
+		if (mirrorMode == MIRROR_X || mirrorMode == MIRROR_XY)
+			C2D_DrawRectSolid(sx + doc.w * z / 2 - (z >= 4 ? 1 : 0.5f), sy < VIEW_Y ? VIEW_Y : sy, 0.5f, z >= 4 ? 2 : 1, doc.h * z, mc);
+		if (mirrorMode == MIRROR_Y || mirrorMode == MIRROR_XY)
+		{
+			float gy = sy + doc.h * z / 2;
+			if (gy >= VIEW_Y)
+				C2D_DrawRectSolid(sx, gy - (z >= 4 ? 1 : 0.5f), 0.5f, doc.w * z, z >= 4 ? 2 : 1, mc);
+		}
+	}
+
 	// palette strip
 	C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, STRIP_H, C_PANEL);
 	for (int i = 0; i < DOC_PALETTE_SIZE; i++)
@@ -620,27 +783,29 @@ static void draw_top_tools(void)
 	gfx_text(392 - gfx_text_width(0.5f, name), 4, 0.5f, C_DIM, "%s", name);
 
 	// tool list
-	gfx_text(10, 30, 0.45f, C_DIM, "TOOLS  (D-pad < >)");
+	gfx_text(10, 26, 0.42f, C_DIM, "TOOLS  D-pad < >   A: options");
 	for (int i = 0; i < TOOL_COUNT; i++)
 	{
-		float y = 46 + i * 20;
+		float y = 40 + i * 15;
 		if (i == tool)
-			C2D_DrawRectSolid(8, y - 2, 0.5f, 176, 19, C_SEL);
-		gfx_text(16, y, 0.55f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
+			C2D_DrawRectSolid(8, y - 1, 0.5f, 180, 15, C_SEL);
+		gfx_text(14, y, 0.48f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
+		char sum[32];
+		tool_summary(i, sum, sizeof(sum));
+		if (sum[0])
+			gfx_text(96, y + 1, 0.42f, C_DIM, "%s", sum);
 	}
 
 	// color
-	float cy = 46 + TOOL_COUNT * 20 + 8;
-	gfx_text(10, cy, 0.45f, C_DIM, "COLOR");
-	C2D_DrawRectSolid(10, cy + 16, 0.5f, 26, 26, C_TEXT);
-	C2D_DrawRectSolid(11, cy + 17, 0.5f, 24, 24, rgba_to_c2d(doc.palette[color]));
-	gfx_text(44, cy + 16, 0.5f, C_TEXT, "Slot %d", color + 1);
-	gfx_text(44, cy + 30, 0.5f, C_TEXT, "#%06lX", (unsigned long)(doc.palette[color] >> 8));
+	float cy = 40 + TOOL_COUNT * 15 + 6;
+	C2D_DrawRectSolid(10, cy, 0.5f, 22, 22, C_TEXT);
+	C2D_DrawRectSolid(11, cy + 1, 0.5f, 20, 20, rgba_to_c2d(doc.palette[color]));
+	gfx_text(40, cy + 4, 0.5f, C_TEXT, "Color %d  #%06lX", color + 1, (unsigned long)(doc.palette[color] >> 8));
 
 	// info
-	float iy = cy + 52;
-	gfx_text(10, iy, 0.45f, C_DIM, "Canvas %dx%d   Zoom %dx", doc.w, doc.h, zoom());
-	gfx_text(10, iy + 14, 0.45f, C_DIM, "Frame %d/%d   Grid %s", doc.curFrame + 1, doc.frameCount, gridOn ? "on" : "off");
+	float iy = cy + 28;
+	gfx_text(10, iy, 0.42f, C_DIM, "Canvas %dx%d  Zoom %dx  Grid %s", doc.w, doc.h, zoom(), gridOn ? "on" : "off");
+	gfx_text(10, iy + 12, 0.42f, C_DIM, "Frame %d/%d  Mirror %s", doc.curFrame + 1, doc.frameCount, MIRROR_NAMES[mirrorMode]);
 
 	// true-size preview
 	C2D_DrawRectSolid(196, 28, 0.5f, 198, 180, C_BG_BOT);
@@ -651,9 +816,10 @@ static void draw_top_tools(void)
 		gfx_text(10, 220, 0.5f, C_ACCENT, "%s", status);
 	else if (mode == MODE_PICKER)
 		gfx_text(10, 220, 0.45f, C_DIM, "Pick a color below.  A: OK   B: cancel");
+	else if (is_shape(tool))
+		gfx_text(10, 222, 0.42f, C_DIM, "Drag to draw. Hold ZR to snap, B cancels.");
 	else
-		gfx_text(10, 214, 0.42f, C_DIM, "L undo  ZL redo  hold R eyedropper  X grid  Y last tool\n"
-		                                 "Circle pad pan  Up/Down zoom  SELECT preview  START menu");
+		gfx_text(10, 222, 0.42f, C_DIM, "L undo  ZL redo  R eyedrop  X grid  START menu");
 }
 
 static void draw_top_preview(void)
@@ -723,6 +889,27 @@ static void draw_top(void)
 		for (int i = 0; i < openCount; i++) labels[i] = openFiles[i];
 		draw_list("Open project", labels, openCount, openSel, "No projects in /3ds/pixel-ui-designer/projects");
 	}
+	else if (mode == MODE_OPTIONS)
+	{
+		OptKind rows[8];
+		int n = opt_rows(tool, rows);
+		C2D_DrawRectSolid(40, 40, 0.5f, 320, 40 + n * 22 + 24, C_PANEL);
+		gfx_rect_outline(40, 40, 320, 40 + n * 22 + 24, 1, C_ACCENT);
+		gfx_text(52, 48, 0.6f, C_TEXT, "%s options", TOOL_NAMES[tool]);
+		if (n == 0)
+			gfx_text(52, 76, 0.5f, C_DIM, "No options for this tool");
+		for (int i = 0; i < n; i++)
+		{
+			float y = 76 + i * 22;
+			if (i == optSel)
+				C2D_DrawRectSolid(46, y - 3, 0.5f, 308, 20, C_SEL);
+			gfx_text(56, y, 0.52f, i == optSel ? C_ACCENT : C_TEXT, "%s", opt_label(rows[i]));
+			char val[48];
+			opt_value(rows[i], val, sizeof(val));
+			gfx_text(176, y, 0.52f, C_TEXT, "< %s >", val);
+		}
+		gfx_text(52, 76 + n * 22 + 6, 0.42f, C_DIM, "Up/Down: option   Left/Right: change   A/B: close");
+	}
 	else if (mode == MODE_CONFIRM)
 	{
 		C2D_DrawRectSolid(70, 80, 0.5f, 260, 80, C_PANEL);
@@ -775,6 +962,8 @@ int main(int argc, char* argv[])
 				touchTarget = (kHeld & KEY_TOUCH) ? TOUCH_STRIP : TOUCH_NONE; // don't draw with the closing tap
 			}
 		}
+		else if (mode == MODE_OPTIONS)
+			update_options(kDown);
 		else
 			update_menus(kDown);
 

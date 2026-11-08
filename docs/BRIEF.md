@@ -10,13 +10,15 @@ Repo: public, MIT. No secrets/keys, only open-licensed fonts/assets, no Nintendo
 - Top screen (400x240, not touch): tool select + true-size preview
 - Bottom screen (320x240, touch): drawing canvas
 - Buttons: commands
+- A (in drawing tools): tool options panel on the top screen (D-pad to change, A/B to close)
 
 ## Button layout (draft, not locked)
 Stylus in right hand, frequent actions on left.
 - Touch: draw | L: undo | ZL: redo
 - D-pad L/R: prev/next tool | Up/Down: zoom
 - Circle pad: pan | R (hold): eyedropper
-- A: confirm/place stamp | B: cancel/deselect
+- A: tool options panel (drawing tools); confirm/place stamp (select/stamp mode) | B: cancel/deselect
+- ZR (hold while dragging a shape): snap — square/circle, lines to 0/45/90° and 2:1 iso
 - X: grid toggle | Y: last-used tool
 - Select: top screen tools <-> preview | Start: menu
 - Settings: left-handed mode mirrors layout
@@ -51,6 +53,18 @@ Stylus in right hand, frequent actions on left.
 - **Project file:** custom binary `.pxd`, one file per project: versioned header, canvas size,
   palette, then a list of frames (compressed indexed pixels). Room to add layers later.
   PNG export is separate.
+
+## Roadmap
+- **M0 (done, v0.0.1):** scaffold, CI, releases.
+- **M1 (done, v0.1.0):** canvas, zoom/pan/grid, palette + hex/wheel picker, eyedropper, undo/redo,
+  .pxd save/open, size presets.
+- **M2:** brush sizes 1–9 with Square/Round/Dither shapes (pencil, eraser); pixel-perfect pencil
+  (size 1); fill (contiguous or replace color); line, rectangle, ellipse (outline/filled, ZR snap,
+  2:1 iso lines); mirror drawing (off / left-right / top-bottom / both); A tool options panel.
+- **M3:** select + move, copy/paste, flip/rotate 90°; stamps; outline (1px around selection/art);
+  shift/wrap canvas; PNG export at 1x/2x/4x/8x and multi-size icon export.
+- **Later in v1:** HUD layout grid (every 8/16 px) and 3x3 tile preview; shading tool (step
+  lighter/darker along a palette ramp); autosave/recovery; text tool; camera mode; left-handed mode.
 
 ## Open questions
 - Default starting palette (needs an open-licensed choice)

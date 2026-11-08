@@ -3,17 +3,20 @@
 Homebrew pixel-art / UI drawing app for the New 3DS, written in C with
 libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 
-## Controls (Milestone 1)
+## Controls
 | Input | Action |
 |---|---|
-| Stylus on canvas | Draw with the current tool |
+| Stylus on canvas | Use the current tool |
 | Tap a palette swatch | Pick that color; tap the selected one again to edit it (wheel, brightness bar, hex) |
-| Hold R + stylus | Eyedropper (also available as a tool) |
+| A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror) |
+| D-pad left/right | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Eyedropper |
+| Hold R + stylus | Eyedropper |
+| Hold ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 |
+| B while dragging a shape | Cancel the shape |
 | L / ZL | Undo / redo |
-| D-pad left/right | Previous / next tool (pencil, eraser, eyedropper) |
 | D-pad up/down | Zoom in / out |
 | Circle pad | Pan |
-| X | Grid on/off (shown at zoom 4x and up) |
+| X | Grid on/off (zoom 4x and up) |
 | Y | Switch to last-used tool |
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… |
 | START | Menu: new canvas (presets + custom), save, save as, open, exit |
