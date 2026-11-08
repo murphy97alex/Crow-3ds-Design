@@ -9,6 +9,9 @@ static Mirror mirror;
 static bool changed;
 static uint8_t orig[DOC_MAX_W * DOC_MAX_H];
 static uint8_t mask[DOC_MAX_W * DOC_MAX_H], mask2[DOC_MAX_W * DOC_MAX_H];
+static const uint8_t* valueMap;
+
+void tools_set_value_map(const uint8_t* map) { valueMap = map; }
 
 bool tools_begin(Doc* d, Mirror m)
 {
@@ -34,6 +37,8 @@ static void set1(int x, int y, uint8_t v)
 {
 	if (x < 0 || y < 0 || x >= doc->w || y >= doc->h)
 		return;
+	if (valueMap)
+		v = valueMap[orig[y * doc->w + x]];
 	uint8_t* p = &doc_pixels(doc)[y * doc->w + x];
 	if (*p != v)
 	{
@@ -269,6 +274,49 @@ void tools_fill(int x, int y, uint8_t v, bool replaceAll)
 		for (int i = 0; i < w; i++)
 			if (mask[j * w + i])
 				put(i, j, v);
+}
+
+// Connected area of the original pixels around (x, y) into `mask`. Returns false if outside.
+static bool area_mask(int x, int y)
+{
+	int w = doc->w, h = doc->h;
+	if (x < 0 || y < 0 || x >= w || y >= h) return false;
+	static int stack[DOC_MAX_W * DOC_MAX_H];
+	uint8_t target = orig[y * w + x];
+	memset(mask, 0, (size_t)w * h);
+	int sp = 0;
+	stack[sp++] = y * w + x;
+	mask[y * w + x] = 1;
+	while (sp > 0)
+	{
+		int k = stack[--sp], kx = k % w, ky = k / w;
+		int nb[4] = { kx > 0 ? k - 1 : -1, kx < w - 1 ? k + 1 : -1, ky > 0 ? k - w : -1, ky < h - 1 ? k + w : -1 };
+		for (int n = 0; n < 4; n++)
+			if (nb[n] >= 0 && !mask[nb[n]] && orig[nb[n]] == target)
+			{
+				mask[nb[n]] = 1;
+				stack[sp++] = nb[n];
+			}
+	}
+	return true;
+}
+
+void tools_gradient_fill(int x0, int y0, int x1, int y1, uint8_t v)
+{
+	static const uint8_t bayer[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };
+	if (!area_mask(x0, y0)) return;
+	int w = doc->w, h = doc->h;
+	float dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++)
+		{
+			if (!mask[y * w + x]) continue;
+			float t = len2 > 0 ? ((x - x0) * dx + (y - y0) * dy) / len2 : 0;
+			t = t < 0 ? 0 : t > 1 ? 1 : t;
+			// t = 0: all new color; t = 1: all original color
+			if (t * 16 < bayer[y & 3][x & 3] + 0.5f)
+				put(x, y, v);
+		}
 }
 
 void tools_snap_line(int x0, int y0, int* x1, int* y1)

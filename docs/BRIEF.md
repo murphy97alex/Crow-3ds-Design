@@ -73,16 +73,13 @@ Stylus in right hand, frequent actions on left.
   "Recommended" preset (1x/2x/4x/8x). Follow-ups from testing: swatches don't recolor (optional
   linked swatches), zoom to 1/4x, Mirror for all tools, stamps drag-to-size, CC0 default palette,
   palette text, square + hue bar picker.
-- **Proposed order from here (Alex picks each milestone):**
-  - **Canvas & import:** resize/crop canvas (anchor, crop to selection); import PNG from SD
-    (as project, stamp, or palette); magic wand (select by color); lasso selection.
-  - **Color tools:** color ramp between two swatches; adjust colors (hue/saturation/brightness,
-    invert); gradient dither fill; recent colors row; shading tool.
-  - **View & guides:** flip view (mirrored preview); HUD layout grid (8/16 px); isometric 2:1 grid;
-    3x3 tile preview; autosave/recovery.
-  - **Layers (Y opens the layer menu on the top screen):** add/delete, move/reorder, merge down
-    and merge visible, per-layer opacity, hide/lock, and layer folders (groups that collapse;
-    hide/lock/opacity apply to the whole folder); .pxd layer chunks. Do before the animator.
+- **M4 (v0.4.0, built 2026-11-08):** canvas & import (resize with anchor, crop to selection,
+  import PNG as project/layer/stamp/swatches, magic wand, lasso); color tools (ramp between swatches,
+  adjust hue/saturation/brightness/invert, gradient dither fill, recent colors, Shade tool); view &
+  guides (flip preview, 3x3 tile preview, HUD grid, isometric 2:1 grid, autosave/recovery); layers
+  (Y menu: add/delete/duplicate, move in/out of folders, merge down/visible, opacity, hide/lock,
+  rename, folders). .pxd v3.
+- **Next (Alex picks):**
   - **Camera mode** (filters → pixel art), **text tool**, **left-handed mode**.
   - **v2 animator** after layers.
 

@@ -29,6 +29,13 @@ void tools_line(int x0, int y0, int x1, int y1, uint8_t v, const Brush* b);
 void tools_rect(int x0, int y0, int x1, int y1, uint8_t v, int size, bool filled);
 void tools_ellipse(int x0, int y0, int x1, int y1, uint8_t v, int size, bool filled);
 void tools_fill(int x, int y, uint8_t v, bool replaceAll);
+// Dithered gradient (4x4 Bayer) inside the connected area at (x0,y0): color v at the start,
+// fading into the area's own color toward (x1,y1).
+void tools_gradient_fill(int x0, int y0, int x1, int y1, uint8_t v);
+
+// While set, drawing ignores the value passed in and writes map[original pixel] instead
+// (used by the shading tool). Pass NULL to turn off.
+void tools_set_value_map(const uint8_t* map);
 
 // Snapping helpers (adjust the end point)
 void tools_snap_line(int x0, int y0, int* x1, int* y1);   // 0/45/90° and 2:1 slopes

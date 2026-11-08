@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "doc.h"
-#include "png.h"
+#include "export_png.h"
 #include "select.h"
 #include "stamps.h"
 
@@ -92,6 +92,34 @@ int main(void)
 		sel_float_pixels(&d, b, 1, 1, 0, 0);   // mirror resets after commit
 		assert(count(3) == 1);
 		sel_cancel(&d);
+	}
+
+	// magic wand: connected vs all of color; moving keeps the shape
+	doc_new(&d, 5, 1); sel_reset();
+	doc_pixels(&d)[0] = 4; doc_pixels(&d)[1] = 4; doc_pixels(&d)[3] = 4;
+	sel_wand(&d, 0, 0, false);
+	assert(sel_active() && sel_has_mask() == false && sel_rect().w == 2);   // full 2x1 rect
+	sel_wand(&d, 0, 0, true);
+	assert(sel_rect().x == 0 && sel_rect().w == 4 && sel_has_mask() && !sel_contains(2, 0) && sel_contains(3, 0));
+	sel_lift(&d);
+	sel_move_to(&d, 1, 0);
+	assert(at(0, 0) == 0 && at(1, 0) == 4 && at(2, 0) == 4 && at(4, 0) == 4 && at(3, 0) == 0);
+	sel_commit(&d);
+	assert(sel_has_mask() && sel_contains(4, 0) && !sel_contains(3, 0));
+	sel_clear(&d);
+
+	// lasso: triangle
+	doc_new(&d, 10, 10); sel_reset();
+	{
+		int tri[] = { 0, 0, 9, 0, 0, 9 };
+		sel_lasso(&d, tri, 3);
+		assert(sel_active() && sel_contains(1, 1) && sel_contains(9, 0) && !sel_contains(9, 9) && !sel_contains(8, 8));
+		for (int i = 0; i < 100; i++) doc_pixels(&d)[i] = 1;
+		uint8_t* p; int w, h;
+		assert(sel_get_pixels(&d, &p, &w, &h) && w == 10 && h == 10 && p[0] == 1 && p[99] == 0);
+		free(p);
+		sel_delete(&d);
+		assert(at(1, 1) == 0 && at(9, 9) == 1);
 	}
 
 	// shift with wrap

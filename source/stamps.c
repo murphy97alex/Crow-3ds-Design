@@ -15,10 +15,16 @@ const char* stamp_save(const char* dir, const char* name, const uint8_t* px, int
 	s.h = h;
 	s.fps = 8;
 	s.frameCount = 1;
+	s.layerCount = 1;
+	s.layers[0].id = 1;
+	s.layers[0].folder = -1;
+	s.layers[0].visible = true;
+	s.layers[0].opacity = 255;
+	snprintf(s.layers[0].name, sizeof(s.layers[0].name), "%s", "Stamp");
 	memcpy(s.swatches, src->swatches, sizeof(s.swatches));
 	memcpy(s.colors, src->colors, sizeof(s.colors));
 	s.colorCount = src->colorCount;
-	s.frames[0] = (uint8_t*)px;
+	s.layers[0].cels[0] = (uint8_t*)px;
 	char path[256];
 	snprintf(path, sizeof(path), "%s/%s.pxd", dir, name);
 	return pxd_save(&s, path);
@@ -33,10 +39,11 @@ const char* stamp_load(const char* dir, const char* name, Doc* target,
 	const char* err = pxd_load(&s, path);
 	if (err) return err;
 	size_t n = (size_t)s.w * s.h;
+	const uint8_t* src = s.layers[s.curLayer].cels[0];
 	bool used[DOC_MAX_COLORS + 1] = { false };
 	int usedCount = 0;
 	for (size_t i = 0; i < n; i++)
-		if (s.frames[0][i] && !used[s.frames[0][i]]) { used[s.frames[0][i]] = true; usedCount++; }
+		if (src[i] && !used[src[i]]) { used[src[i]] = true; usedCount++; }
 	if (target->colorCount + usedCount > DOC_MAX_COLORS)
 		doc_compact(target);
 	uint8_t map[DOC_MAX_COLORS + 1] = { 0 };
@@ -46,7 +53,7 @@ const char* stamp_load(const char* dir, const char* name, Doc* target,
 	uint8_t* out = malloc(n);
 	if (!out) { doc_free(&s); return "Out of memory"; }
 	for (size_t i = 0; i < n; i++)
-		out[i] = map[s.frames[0][i]];
+		out[i] = map[src[i]];
 	*px = out;
 	*w = s.w;
 	*h = s.h;

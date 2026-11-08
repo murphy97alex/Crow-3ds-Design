@@ -48,23 +48,14 @@ void gfx_fini(void)
 
 void gfx_frame_begin(void) { C2D_TextBufClear(textBuf); }
 
-static inline u32 pix_color(const Doc* d, uint8_t v)
-{
-	return doc_color(d, v);
-}
-
-void gfx_canvas_set(const Doc* d, int x, int y)
-{
-	((u32*)canvasTex.data)[tiled(x, y, CANVAS_TEX_W)] = pix_color(d, doc_get(d, x, y));
-	canvasDirty = true;
-}
-
 void gfx_canvas_rebuild(const Doc* d)
 {
+	static uint32_t comp[DOC_MAX_W * DOC_MAX_H];
+	doc_composite(d, d->curFrame, comp);   // all visible layers
 	u32* t = (u32*)canvasTex.data;
 	for (int y = 0; y < d->h; y++)
 		for (int x = 0; x < d->w; x++)
-			t[tiled(x, y, CANVAS_TEX_W)] = pix_color(d, doc_get(d, x, y));
+			t[tiled(x, y, CANVAS_TEX_W)] = comp[y * d->w + x];
 	canvasDirty = true;
 }
 
@@ -110,6 +101,15 @@ void gfx_draw_canvas(const Doc* d, float x, float y, float scale, float clipY0, 
 	float u0 = (x0 - x) / scale / CANVAS_TEX_W, u1 = (x1 - x) / scale / CANVAS_TEX_W;
 	float v0 = (y0 - y) / scale / CANVAS_TEX_H, v1 = (y1 - y) / scale / CANVAS_TEX_H;
 	draw_tex(&canvasTex, x0, y0, x1 - x0, y1 - y0, u0, v0, u1, v1);
+}
+
+void gfx_draw_canvas_ex(const Doc* d, float x, float y, float scale, bool flipX)
+{
+	float w = d->w * scale, h = d->h * scale;
+	gfx_draw_checker(x, y, w, h, 4);
+	float u = (float)d->w / CANVAS_TEX_W, v = (float)d->h / CANVAS_TEX_H;
+	if (flipX) draw_tex(&canvasTex, x, y, w, h, u, 0, 0, v);
+	else draw_tex(&canvasTex, x, y, w, h, 0, 0, u, v);
 }
 
 void gfx_text(float x, float y, float scale, u32 color, const char* fmt, ...)

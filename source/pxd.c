@@ -69,6 +69,7 @@ const char* pxd_save(const Doc* d, const char* path)
 	put16(head + 6, d->frameCount);
 	put16(head + 8, d->fps);
 	put16(head + 10, d->linkedSwatches ? 1 : 0); // flags: bit 0 = linked swatches
+	put16(head + 12, d->curLayer);
 	ok = ok && write_chunk(f, "HEAD", head, sizeof(head));
 
 	uint8_t pal[DOC_MAX_COLORS * 4];
@@ -80,12 +81,25 @@ const char* pxd_save(const Doc* d, const char* path)
 		put32(sw + i * 4, d->swatches[i]);
 	ok = ok && write_chunk(f, "SWAT", sw, sizeof(sw));
 
-	for (int fr = 0; ok && fr < d->frameCount; fr++)
+	for (int li = 0; ok && li < d->layerCount; li++)
 	{
-		// FRAM payload: u16 duration_ms (0 = use fps), u8 encoding (1 = RLE), u8 reserved, data
-		buf[0] = 0; buf[1] = 0; buf[2] = 1; buf[3] = 0;
-		uint32_t len = rle_encode(d->frames[fr], n, buf + 4);
-		ok = write_chunk(f, "FRAM", buf, len + 4);
+		const Layer* L = &d->layers[li];
+		// LAYR payload: u16 id, u16 folder id + 1 (0 = none), u8 flags, u8 opacity, u16 reserved,
+		// name (16 bytes, NUL padded). Its FRAM chunks follow (none for folders).
+		uint8_t lh[24] = {0};
+		put16(lh, L->id);
+		put16(lh + 2, L->folder + 1);
+		lh[4] = (L->isFolder ? 1 : 0) | (L->visible ? 2 : 0) | (L->locked ? 4 : 0) | (L->collapsed ? 8 : 0);
+		lh[5] = L->opacity;
+		memcpy(lh + 8, L->name, strnlen(L->name, LAYER_NAME_MAX));
+		ok = write_chunk(f, "LAYR", lh, sizeof(lh));
+		for (int fr = 0; ok && !L->isFolder && fr < d->frameCount; fr++)
+		{
+			// FRAM payload: u16 duration_ms (0 = use fps), u8 encoding (1 = RLE), u8 reserved, data
+			buf[0] = 0; buf[1] = 0; buf[2] = 1; buf[3] = 0;
+			uint32_t len = rle_encode(L->cels[fr], n, buf + 4);
+			ok = write_chunk(f, "FRAM", buf, len + 4);
+		}
 	}
 	ok = ok && write_chunk(f, "END ", NULL, 0);
 	ok = (fclose(f) == 0) && ok;
@@ -115,7 +129,7 @@ const char* pxd_load(Doc* d, const char* path)
 	Doc nd = {0};
 	const char* err = NULL;
 	bool gotHead = false, gotEnd = false, gotSwatches = false;
-	int frames = 0, expectFrames = 0;
+	int frames = 0, expectFrames = 0, curL = -1, headCur = -1;
 	uint32_t n = 0;
 
 	for (long p = 4; p + 8 <= size && !err && !gotEnd;)
@@ -134,6 +148,7 @@ const char* pxd_load(Doc* d, const char* path)
 			expectFrames = get16(body + 6);
 			nd.fps = get16(body + 8);
 			nd.linkedSwatches = get16(body + 10) & 1;
+			headCur = len >= 14 ? get16(body + 12) : -1;
 			if (nd.w < 1 || nd.h < 1 || nd.w > DOC_MAX_W || nd.h > DOC_MAX_H ||
 			    expectFrames < 1 || expectFrames > DOC_MAX_FRAMES)
 				{ err = "Unsupported size"; break; }
@@ -153,13 +168,45 @@ const char* pxd_load(Doc* d, const char* path)
 				nd.swatches[i] = get32(body + i * 4);
 			gotSwatches = true;
 		}
+		else if (!memcmp(id, "LAYR", 4))
+		{
+			if (!gotHead || len < 24 || nd.layerCount >= DOC_MAX_LAYERS) { err = "Bad layer"; break; }
+			if (curL >= 0 && !nd.layers[curL].isFolder && frames != expectFrames) { err = "Missing frames"; break; }
+			Layer* L = &nd.layers[nd.layerCount];
+			memset(L, 0, sizeof(*L));
+			L->id = get16(body);
+			L->folder = (int)get16(body + 2) - 1;
+			L->isFolder = body[4] & 1;
+			L->visible = body[4] & 2;
+			L->locked = body[4] & 4;
+			L->collapsed = body[4] & 8;
+			L->opacity = body[5];
+			memcpy(L->name, body + 8, LAYER_NAME_MAX - 1);
+			curL = nd.layerCount++;
+			frames = 0;
+		}
 		else if (!memcmp(id, "FRAM", 4))
 		{
-			if (!gotHead || frames >= expectFrames) { err = "Bad frame"; break; }
+			if (!gotHead) { err = "Bad frame"; break; }
+			if (curL < 0)
+			{
+				// version 1/2 file: one implicit layer
+				Layer* L = &nd.layers[0];
+				memset(L, 0, sizeof(*L));
+				L->id = 1;
+				L->folder = -1;
+				L->visible = true;
+				L->opacity = 255;
+				snprintf(L->name, sizeof(L->name), "Layer 1");
+				nd.layerCount = 1;
+				curL = 0;
+				frames = 0;
+			}
+			if (nd.layers[curL].isFolder || frames >= expectFrames) { err = "Bad frame"; break; }
 			if (len < 4 || body[2] != 1) { err = "Unknown frame encoding"; break; }
 			uint8_t* px = malloc(n);
 			if (!px) { err = "Out of memory"; break; }
-			nd.frames[frames++] = px;
+			nd.layers[curL].cels[frames++] = px;
 			if (!rle_decode(body + 4, len - 4, px, n)) { err = "Corrupt frame"; break; }
 			for (uint32_t i = 0; i < n; i++)
 				if (px[i] > nd.colorCount) px[i] = PIX_TRANSPARENT;
@@ -175,9 +222,34 @@ const char* pxd_load(Doc* d, const char* path)
 	if (!gotSwatches)
 		for (int i = 0; i < DOC_PALETTE_SIZE && i < nd.colorCount; i++)
 			nd.swatches[i] = nd.colors[i + 1];
-	if (!err && (!gotHead || frames != expectFrames))
+	nd.frameCount = expectFrames;
+	if (!err && (!gotHead || nd.layerCount == 0))
 		err = "Missing data";
-	nd.frameCount = frames;
+	int drawable = 0;
+	for (int i = 0; !err && i < nd.layerCount; i++)
+	{
+		Layer* L = &nd.layers[i];
+		if (L->isFolder) continue;
+		drawable++;
+		for (int fr = 0; fr < expectFrames; fr++)
+			if (!L->cels[fr]) { err = "Missing frames"; break; }
+	}
+	if (!err && drawable == 0)
+		err = "No layers";
+	if (!err)
+	{
+		nd.nextLayerId = 1;
+		for (int i = 0; i < nd.layerCount; i++)
+			if (nd.layers[i].id >= nd.nextLayerId) nd.nextLayerId = nd.layers[i].id + 1;
+		for (int i = 0; i < nd.layerCount; i++)
+			if (nd.layers[i].folder >= 0 && (nd.layers[i].isFolder || doc_layer_index(&nd, nd.layers[i].folder) < 0))
+				nd.layers[i].folder = -1;
+		nd.curLayer = -1;
+		if (headCur >= 0 && headCur < nd.layerCount && !nd.layers[headCur].isFolder)
+			nd.curLayer = headCur;
+		for (int i = nd.layerCount - 1; nd.curLayer < 0 && i >= 0; i--)
+			if (!nd.layers[i].isFolder) nd.curLayer = i;
+	}
 	if (err)
 	{
 		doc_free(&nd);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "doc.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,12 +19,39 @@ const uint32_t DOC_DEFAULT_PALETTE[DOC_PALETTE_SIZE] = {
 	0xB8307EFF, 0xF27AB8FF,
 };
 
+static void layer_init(Doc* d, Layer* L, bool folder)
+{
+	memset(L, 0, sizeof(*L));
+	L->id = d->nextLayerId++;
+	L->folder = -1;
+	L->isFolder = folder;
+	L->visible = true;
+	L->opacity = 255;
+	snprintf(L->name, sizeof(L->name), "%s %d", folder ? "Folder" : "Layer", L->id);
+}
+
+static bool layer_alloc(Doc* d, Layer* L)
+{
+	if (L->isFolder)
+		return true;
+	for (int f = 0; f < d->frameCount; f++)
+		if (!(L->cels[f] = calloc((size_t)d->w * d->h, 1)))
+			return false;
+	return true;
+}
+
+static void layer_free(Layer* L)
+{
+	for (int f = 0; f < DOC_MAX_FRAMES; f++)
+	{
+		free(L->cels[f]);
+		L->cels[f] = NULL;
+	}
+}
+
 bool doc_new(Doc* d, int w, int h)
 {
 	if (w < 1 || h < 1 || w > DOC_MAX_W || h > DOC_MAX_H)
-		return false;
-	uint8_t* px = calloc((size_t)w * h, 1);
-	if (!px)
 		return false;
 	doc_free(d);
 	d->w = w;
@@ -33,12 +61,31 @@ bool doc_new(Doc* d, int w, int h)
 	d->colorCount = 0;
 	d->frameCount = 1;
 	d->curFrame = 0;
-	d->frames[0] = px;
+	d->nextLayerId = 1;
+	d->layerCount = 1;
+	d->curLayer = 0;
+	layer_init(d, &d->layers[0], false);
+	if (!layer_alloc(d, &d->layers[0]))
+	{
+		doc_free(d);
+		return false;
+	}
+	d->linkedSwatches = false;
 	d->name[0] = '\0';
 	d->dirty = false;
 	hist_clear();
 	return true;
 }
+
+void doc_free(Doc* d)
+{
+	for (int i = 0; i < DOC_MAX_LAYERS; i++)
+		layer_free(&d->layers[i]);
+	d->layerCount = 0;
+	d->frameCount = 0;
+}
+
+// ---- colors ----------------------------------------------------------------------
 
 static long color_dist(uint32_t a, uint32_t b)
 {
@@ -48,13 +95,19 @@ static long color_dist(uint32_t a, uint32_t b)
 	return dr * dr * 3 + dg * dg * 4 + db * db * 2;
 }
 
+// Calls fn on every pixel buffer of the document.
+#define FOR_EACH_CEL(d, cel)                                              \
+	for (int _l = 0; _l < (d)->layerCount; _l++)                          \
+		for (int _f = 0; _f < (d)->frameCount; _f++)                      \
+			for (uint8_t* cel = (d)->layers[_l].cels[_f]; cel; cel = NULL)
+
 void doc_compact(Doc* d)
 {
 	bool used[DOC_MAX_COLORS + 1] = { false };
 	size_t n = (size_t)d->w * d->h;
-	for (int f = 0; f < d->frameCount; f++)
+	FOR_EACH_CEL(d, cel)
 		for (size_t i = 0; i < n; i++)
-			used[d->frames[f][i]] = true;
+			used[cel[i]] = true;
 	uint8_t remap[DOC_MAX_COLORS + 1] = { 0 };
 	int count = 0;
 	for (int v = 1; v <= d->colorCount; v++)
@@ -63,9 +116,9 @@ void doc_compact(Doc* d)
 			d->colors[++count] = d->colors[v];
 			remap[v] = count;
 		}
-	for (int f = 0; f < d->frameCount; f++)
+	FOR_EACH_CEL(d, cel)
 		for (size_t i = 0; i < n; i++)
-			d->frames[f][i] = remap[d->frames[f][i]];
+			cel[i] = remap[cel[i]];
 	d->colorCount = count;
 }
 
@@ -117,38 +170,488 @@ bool doc_recolor(Doc* d, const uint32_t* from, const uint32_t* to, int n)
 	if (needRemap)
 	{
 		size_t np = (size_t)d->w * d->h;
-		for (int f = 0; f < d->frameCount; f++)
+		FOR_EACH_CEL(d, cel)
 			for (size_t i = 0; i < np; i++)
-				d->frames[f][i] = remap[d->frames[f][i]];
+				cel[i] = remap[cel[i]];
 	}
 	return true;
 }
 
-void doc_free(Doc* d)
+// ---- layers ----------------------------------------------------------------------
+
+int doc_layer_index(const Doc* d, int id)
 {
-	for (int i = 0; i < DOC_MAX_FRAMES; i++)
-	{
-		free(d->frames[i]);
-		d->frames[i] = NULL;
-	}
-	d->frameCount = 0;
+	for (int i = 0; i < d->layerCount; i++)
+		if (d->layers[i].id == id)
+			return i;
+	return -1;
 }
 
-// ---- history ---------------------------------------------------------------
+static const Layer* folder_of(const Doc* d, int i)
+{
+	int f = d->layers[i].folder >= 0 ? doc_layer_index(d, d->layers[i].folder) : -1;
+	return f >= 0 ? &d->layers[f] : NULL;
+}
+
+bool doc_layer_visible(const Doc* d, int i)
+{
+	const Layer* f = folder_of(d, i);
+	return d->layers[i].visible && (!f || f->visible);
+}
+
+bool doc_layer_locked(const Doc* d, int i)
+{
+	const Layer* f = folder_of(d, i);
+	return d->layers[i].locked || (f && f->locked);
+}
+
+int doc_layer_opacity(const Doc* d, int i)
+{
+	const Layer* f = folder_of(d, i);
+	return f ? d->layers[i].opacity * f->opacity / 255 : d->layers[i].opacity;
+}
+
+int doc_folder_size(const Doc* d, int i)
+{
+	if (!d->layers[i].isFolder)
+		return 0;
+	int n = 0;
+	for (int j = i - 1; j >= 0 && d->layers[j].folder == d->layers[i].id; j--)
+		n++;
+	return n;
+}
+
+static int drawable_count(const Doc* d)
+{
+	int n = 0;
+	for (int i = 0; i < d->layerCount; i++)
+		n += !d->layers[i].isFolder;
+	return n;
+}
+
+void doc_set_current_layer(Doc* d, int i)
+{
+	if (i >= 0 && i < d->layerCount && !d->layers[i].isFolder)
+		d->curLayer = i;
+}
+
+// Keep curLayer pointing at the same layer (by id) after entries move around.
+static void fix_current(Doc* d, int curId)
+{
+	int i = doc_layer_index(d, curId);
+	if (i >= 0 && !d->layers[i].isFolder) { d->curLayer = i; return; }
+	// current layer was removed: nearest drawable layer
+	int best = -1;
+	for (int j = 0; j < d->layerCount; j++)
+		if (!d->layers[j].isFolder && (best < 0 || abs(j - d->curLayer) < abs(best - d->curLayer)))
+			best = j;
+	d->curLayer = best < 0 ? 0 : best;
+}
+
+static void insert_at(Doc* d, int pos, const Layer* L)
+{
+	memmove(&d->layers[pos + 1], &d->layers[pos], sizeof(Layer) * (d->layerCount - pos));
+	d->layers[pos] = *L;
+	d->layerCount++;
+}
+
+static void remove_at(Doc* d, int pos)
+{
+	layer_free(&d->layers[pos]);
+	memmove(&d->layers[pos], &d->layers[pos + 1], sizeof(Layer) * (d->layerCount - pos - 1));
+	memset(&d->layers[d->layerCount - 1], 0, sizeof(Layer));
+	d->layerCount--;
+}
+
+int doc_layer_add(Doc* d, bool folder)
+{
+	if (d->layerCount >= DOC_MAX_LAYERS)
+		return -1;
+	Layer L;
+	layer_init(d, &L, folder);
+	if (!layer_alloc(d, &L)) { layer_free(&L); return -1; }
+	int cur = d->curLayer, pos;
+	if (!folder)
+	{
+		pos = cur + 1;
+		L.folder = d->layers[cur].folder;
+	}
+	else
+	{
+		int h = d->layers[cur].folder >= 0 ? doc_layer_index(d, d->layers[cur].folder) : cur;
+		pos = h + 1;
+	}
+	insert_at(d, pos, &L);
+	if (!folder)
+		d->curLayer = pos;
+	return pos;
+}
+
+int doc_layer_duplicate(Doc* d, int i)
+{
+	if (d->layerCount >= DOC_MAX_LAYERS || d->layers[i].isFolder)
+		return -1;
+	Layer L = d->layers[i];
+	L.id = d->nextLayerId++;
+	char nm[LAYER_NAME_MAX];
+	snprintf(nm, sizeof(nm), "%.10s copy", d->layers[i].name);
+	memcpy(L.name, nm, sizeof(nm));
+	memset(L.cels, 0, sizeof(L.cels));
+	size_t n = (size_t)d->w * d->h;
+	for (int f = 0; f < d->frameCount; f++)
+	{
+		if (!(L.cels[f] = malloc(n))) { layer_free(&L); return -1; }
+		memcpy(L.cels[f], d->layers[i].cels[f], n);
+	}
+	insert_at(d, i + 1, &L);
+	d->curLayer = i + 1;
+	return i + 1;
+}
+
+static void swap_layers(Doc* d, int a, int b)
+{
+	Layer t = d->layers[a];
+	d->layers[a] = d->layers[b];
+	d->layers[b] = t;
+}
+
+// Move layers [lo,hi] so they come after [hi+1, uhi] (i.e. swap two adjacent ranges).
+static void swap_ranges(Doc* d, int lo, int mid, int hi)
+{
+	// ranges [lo, mid] and [mid+1, hi] -> [mid+1, hi][lo, mid]
+	Layer tmp[DOC_MAX_LAYERS];
+	int a = mid - lo + 1, b = hi - mid;
+	memcpy(tmp, &d->layers[mid + 1], sizeof(Layer) * b);
+	memcpy(tmp + b, &d->layers[lo], sizeof(Layer) * a);
+	memcpy(&d->layers[lo], tmp, sizeof(Layer) * (a + b));
+}
+
+int doc_layer_move(Doc* d, int i, int dir)
+{
+	int curId = d->layers[d->curLayer].id;
+	Layer* L = &d->layers[i];
+	int result = -1;
+	if (!L->isFolder)
+	{
+		if (dir > 0)
+		{
+			int j = i + 1;
+			if (j >= d->layerCount) return -1;
+			Layer* J = &d->layers[j];
+			if (L->folder >= 0 && J->isFolder && J->id == L->folder)
+			{
+				swap_layers(d, i, j);            // leave the folder upward
+				d->layers[j].folder = -1;
+				result = j;
+			}
+			else if (L->folder < 0 && J->folder >= 0)
+			{
+				L->folder = J->folder;            // join the folder above (as its bottom member)
+				result = i;
+			}
+			else if (L->folder < 0 && J->isFolder)
+			{
+				L->folder = J->id;                // join an empty folder directly above
+				result = i;
+			}
+			else
+			{
+				swap_layers(d, i, j);
+				result = j;
+			}
+		}
+		else
+		{
+			int j = i - 1;
+			if (L->folder >= 0 && (j < 0 || d->layers[j].folder != L->folder))
+			{
+				L->folder = -1;                   // leave the folder downward (stays in place)
+				result = i;
+			}
+			else if (j < 0)
+				return -1;
+			else if (L->folder < 0 && d->layers[j].isFolder)
+			{
+				int fid = d->layers[j].id;        // enter the folder below, at its top
+				swap_layers(d, i, j);
+				d->layers[j].folder = fid;
+				result = j;
+			}
+			else
+			{
+				swap_layers(d, i, j);
+				result = j;
+			}
+		}
+	}
+	else
+	{
+		int hi = i, lo = i - doc_folder_size(d, i);
+		if (dir > 0)
+		{
+			int j = hi + 1;
+			if (j >= d->layerCount) return -1;
+			int uhi = j;
+			if (d->layers[j].folder >= 0)
+				uhi = doc_layer_index(d, d->layers[j].folder);   // whole folder block above
+			swap_ranges(d, lo, hi, uhi);
+			result = uhi;
+		}
+		else
+		{
+			int j = lo - 1;
+			if (j < 0) return -1;
+			int ulo = j;
+			if (d->layers[j].isFolder)
+				ulo = j - doc_folder_size(d, j);                 // whole folder block below
+			swap_ranges(d, ulo, j, hi);
+			result = ulo + (hi - lo);
+		}
+	}
+	fix_current(d, curId);
+	return result;
+}
+
+bool doc_layer_delete(Doc* d, int i)
+{
+	int first = i, last = i;
+	if (d->layers[i].isFolder)
+		first = i - doc_folder_size(d, i);
+	int removedDrawable = 0;
+	for (int k = first; k <= last; k++)
+		removedDrawable += !d->layers[k].isFolder;
+	if (drawable_count(d) - removedDrawable < 1)
+		return false;
+	int curId = d->layers[d->curLayer].id;
+	for (int k = last; k >= first; k--)
+		remove_at(d, k);
+	if (d->curLayer >= d->layerCount) d->curLayer = d->layerCount - 1;
+	fix_current(d, curId);
+	return true;
+}
+
+static uint32_t blend(uint32_t dst, uint32_t src, int a)
+{
+	uint32_t out = 0xFF;
+	for (int sh = 8; sh <= 24; sh += 8)
+	{
+		int dc = (dst >> sh) & 255, sc = (src >> sh) & 255;
+		out |= (uint32_t)((sc * a + dc * (255 - a)) / 255) << sh;
+	}
+	return out;
+}
+
+bool doc_layer_merge_down(Doc* d, int i)
+{
+	int j = i - 1;
+	if (j < 0 || d->layers[i].isFolder || d->layers[j].isFolder)
+		return false;
+	int a = d->layers[i].opacity;
+	size_t n = (size_t)d->w * d->h;
+	for (int f = 0; f < d->frameCount; f++)
+	{
+		uint8_t *src = d->layers[i].cels[f], *dst = d->layers[j].cels[f];
+		for (size_t k = 0; k < n; k++)
+		{
+			if (!src[k]) continue;
+			if (a >= 255) dst[k] = src[k];
+			else if (!dst[k]) dst[k] = a >= 128 ? src[k] : 0;
+			else dst[k] = doc_color_index(d, blend(d->colors[dst[k]], d->colors[src[k]], a), false);
+		}
+	}
+	int keepId = d->layers[j].id;
+	remove_at(d, i);
+	fix_current(d, keepId);
+	return true;
+}
+
+bool doc_merge_visible(Doc* d)
+{
+	int target = -1, count = 0;
+	for (int i = 0; i < d->layerCount; i++)
+		if (!d->layers[i].isFolder && doc_layer_visible(d, i))
+		{
+			if (target < 0) target = i;
+			count++;
+		}
+	if (count < 2)
+		return false;
+	doc_compact(d);
+	size_t n = (size_t)d->w * d->h;
+	uint32_t* rgba = malloc(n * 4);
+	if (!rgba) return false;
+	for (int f = 0; f < d->frameCount; f++)
+	{
+		doc_composite(d, f, rgba);
+		uint8_t* dst = d->layers[target].cels[f];
+		for (size_t k = 0; k < n; k++)
+			dst[k] = (rgba[k] & 255) >= 128 ? doc_color_index(d, rgba[k], false) : 0;
+	}
+	free(rgba);
+	int keepId = d->layers[target].id;
+	d->layers[target].opacity = 255;
+	for (int i = d->layerCount - 1; i > target; i--)
+		if (!d->layers[i].isFolder && doc_layer_visible(d, i))
+			remove_at(d, i);
+	fix_current(d, keepId);
+	return true;
+}
+
+void doc_composite(const Doc* d, int frame, uint32_t* out)
+{
+	size_t n = (size_t)d->w * d->h;
+	memset(out, 0, n * 4);
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		if (d->layers[i].isFolder || !doc_layer_visible(d, i)) continue;
+		int a = doc_layer_opacity(d, i);
+		if (a <= 0) continue;
+		const uint8_t* px = d->layers[i].cels[frame];
+		for (size_t k = 0; k < n; k++)
+		{
+			uint8_t v = px[k];
+			if (!v) continue;
+			uint32_t c = doc_color(d, v);
+			if (a >= 255) { out[k] = c; continue; }
+			uint32_t dst = out[k];
+			int da = dst & 255;
+			int oa = a + da * (255 - a) / 255;
+			if (oa <= 0) continue;
+			uint32_t r = (uint32_t)oa;
+			for (int sh = 8; sh <= 24; sh += 8)
+			{
+				int sc = (c >> sh) & 255, dc = (dst >> sh) & 255;
+				int v2 = (sc * a + dc * da * (255 - a) / 255) / oa;
+				r |= (uint32_t)(v2 > 255 ? 255 : v2) << sh;
+			}
+			out[k] = r;
+		}
+	}
+}
+
+// ---- canvas ----------------------------------------------------------------------
+
+// New size; old pixel (x, y) moves to (x + ox, y + oy).
+static bool reframe(Doc* d, int w, int h, int ox, int oy)
+{
+	if (w < 1 || h < 1 || w > DOC_MAX_W || h > DOC_MAX_H)
+		return false;
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		Layer* L = &d->layers[i];
+		if (L->isFolder) continue;
+		for (int f = 0; f < d->frameCount; f++)
+		{
+			uint8_t* nb = calloc((size_t)w * h, 1);
+			if (!nb) return false;
+			for (int y = 0; y < d->h; y++)
+			{
+				int ny = y + oy;
+				if (ny < 0 || ny >= h) continue;
+				for (int x = 0; x < d->w; x++)
+				{
+					int nx = x + ox;
+					if (nx >= 0 && nx < w)
+						nb[ny * w + nx] = L->cels[f][y * d->w + x];
+				}
+			}
+			free(L->cels[f]);
+			L->cels[f] = nb;
+		}
+	}
+	d->w = w;
+	d->h = h;
+	return true;
+}
+
+bool doc_resize(Doc* d, int w, int h, int ax, int ay)
+{
+	return reframe(d, w, h, (w - d->w) * ax / 2, (h - d->h) * ay / 2);
+}
+
+bool doc_crop(Doc* d, int x, int y, int w, int h)
+{
+	return reframe(d, w, h, -x, -y);
+}
+
+// ---- history ---------------------------------------------------------------------
 
 #define HIST_MAX 48
+#define HIST_BUDGET (12u * 1024 * 1024)   // bytes of pixel data kept for undo/redo
 
 typedef struct {
-	int frame;
-	uint32_t colors[DOC_MAX_COLORS + 1];
-	int colorCount;
-	uint8_t* px;
+	Doc* doc;     // deep copy (swatches, name and dirty flag are ignored on restore)
+	size_t bytes;
 } Snap;
 
 static Snap undoStack[HIST_MAX], redoStack[HIST_MAX];
 static int undoCount, redoCount;
+static size_t histBytes;
+static Snap pending;
+static bool hasPending;
 
-static void snap_free(Snap* s) { free(s->px); s->px = NULL; }
+static void snap_free(Snap* s)
+{
+	if (!s->doc) return;
+	doc_free(s->doc);
+	free(s->doc);
+	s->doc = NULL;
+	histBytes -= s->bytes;
+	s->bytes = 0;
+}
+
+static bool snap_take(Snap* s, const Doc* d)
+{
+	Doc* c = malloc(sizeof(Doc));
+	if (!c) return false;
+	*c = *d;
+	size_t n = (size_t)d->w * d->h, bytes = 0;
+	for (int i = 0; i < c->layerCount; i++)
+	{
+		Layer* L = &c->layers[i];
+		for (int f = 0; f < DOC_MAX_FRAMES; f++)
+		{
+			if (!d->layers[i].cels[f]) { L->cels[f] = NULL; continue; }
+			L->cels[f] = malloc(n);
+			if (!L->cels[f])
+			{
+				for (int k = f; k < DOC_MAX_FRAMES; k++) L->cels[k] = NULL;
+				for (int k = i + 1; k < DOC_MAX_LAYERS; k++) memset(c->layers[k].cels, 0, sizeof(c->layers[k].cels));
+				doc_free(c);
+				free(c);
+				return false;
+			}
+			memcpy(L->cels[f], d->layers[i].cels[f], n);
+			bytes += n;
+		}
+	}
+	for (int i = c->layerCount; i < DOC_MAX_LAYERS; i++)
+		memset(c->layers[i].cels, 0, sizeof(c->layers[i].cels));
+	s->doc = c;
+	s->bytes = bytes;
+	histBytes += bytes;
+	return true;
+}
+
+// Restore the document from a snapshot (consumes the snapshot's pixel buffers).
+static void snap_restore(Snap* s, Doc* d)
+{
+	Doc* c = s->doc;
+	uint32_t sw[DOC_PALETTE_SIZE];
+	char name[DOC_NAME_MAX];
+	bool linked = d->linkedSwatches;
+	memcpy(sw, d->swatches, sizeof(sw));
+	memcpy(name, d->name, sizeof(name));
+	doc_free(d);
+	*d = *c;
+	memcpy(d->swatches, sw, sizeof(sw));
+	memcpy(d->name, name, sizeof(name));
+	d->linkedSwatches = linked;
+	free(c);
+	histBytes -= s->bytes;
+	s->doc = NULL;
+	s->bytes = 0;
+}
 
 static void stack_clear(Snap* st, int* n)
 {
@@ -157,35 +660,11 @@ static void stack_clear(Snap* st, int* n)
 	*n = 0;
 }
 
-void hist_abort(void);
-
-void hist_clear(void)
+static void drop_oldest_undo(void)
 {
-	hist_abort();
-	stack_clear(undoStack, &undoCount);
-	stack_clear(redoStack, &redoCount);
-}
-
-static bool snap_take(Snap* s, const Doc* d)
-{
-	size_t n = (size_t)d->w * d->h;
-	s->px = malloc(n);
-	if (!s->px)
-		return false;
-	memcpy(s->px, d->frames[d->curFrame], n);
-	memcpy(s->colors, d->colors, sizeof(s->colors));
-	s->colorCount = d->colorCount;
-	s->frame = d->curFrame;
-	return true;
-}
-
-static void snap_restore(Snap* s, Doc* d)
-{
-	memcpy(d->frames[s->frame], s->px, (size_t)d->w * d->h);
-	memcpy(d->colors, s->colors, sizeof(d->colors));
-	d->colorCount = s->colorCount;
-	d->curFrame = s->frame;
-	snap_free(s);
+	snap_free(&undoStack[0]);
+	memmove(&undoStack[0], &undoStack[1], sizeof(Snap) * (undoCount - 1));
+	undoCount--;
 }
 
 static void stack_push(Snap* st, int* n, Snap s)
@@ -197,19 +676,23 @@ static void stack_push(Snap* st, int* n, Snap s)
 		(*n)--;
 	}
 	st[(*n)++] = s;
+	while (histBytes > HIST_BUDGET && undoCount > 1)
+		drop_oldest_undo();
 }
 
-void hist_push(const Doc* d)
+void hist_abort(void)
 {
-	Snap s;
-	if (!snap_take(&s, d))
-		return;
-	stack_push(undoStack, &undoCount, s);
+	if (hasPending)
+		snap_free(&pending);
+	hasPending = false;
+}
+
+void hist_clear(void)
+{
+	hist_abort();
+	stack_clear(undoStack, &undoCount);
 	stack_clear(redoStack, &redoCount);
 }
-
-static Snap pending;
-static bool hasPending;
 
 void hist_begin(const Doc* d)
 {
@@ -221,23 +704,22 @@ void hist_commit(void)
 {
 	if (!hasPending)
 		return;
-	stack_push(undoStack, &undoCount, pending);
 	stack_clear(redoStack, &redoCount);
+	stack_push(undoStack, &undoCount, pending);
+	pending.doc = NULL;
 	hasPending = false;
 }
 
-void hist_abort(void)
+void hist_push(const Doc* d)
 {
-	if (hasPending)
-		snap_free(&pending);
-	hasPending = false;
+	hist_begin(d);
+	hist_commit();
 }
 
 static bool hist_move(Doc* d, Snap* from, int* nFrom, Snap* to, int* nTo)
 {
 	if (*nFrom == 0)
 		return false;
-	d->curFrame = from[*nFrom - 1].frame;
 	Snap cur;
 	if (!snap_take(&cur, d))
 		return false;

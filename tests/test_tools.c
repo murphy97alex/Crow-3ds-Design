@@ -83,6 +83,32 @@ int main(void)
 	tools_begin(&d, MIRROR_OFF);
 	tools_line(0, 5, 9, 5, 1, &b1); assert(count(1) == 10);
 
+	// shading map: value 1 -> 2, others unchanged
+	doc_new(&d, 4, 1);
+	doc_pixels(&d)[0] = 1; doc_pixels(&d)[1] = 1; doc_pixels(&d)[2] = 3;
+	tools_begin(&d, MIRROR_OFF);
+	uint8_t map[256];
+	for (int i = 0; i < 256; i++) map[i] = i;
+	map[1] = 2;
+	tools_set_value_map(map);
+	tools_line(0, 0, 3, 0, 9, &b1);
+	tools_set_value_map(NULL);
+	assert(at(0, 0) == 2 && at(1, 0) == 2 && at(2, 0) == 3 && at(3, 0) == 0);
+
+	// gradient: left end all new color, right end all original, dithered in between
+	doc_new(&d, 16, 4);
+	tools_begin(&d, MIRROR_OFF);
+	tools_gradient_fill(0, 0, 15, 0, 5);
+	for (int y = 0; y < 4; y++) assert(at(0, y) == 5 && at(15, y) == 0);
+	int mid = 0; for (int y = 0; y < 4; y++) for (int x = 6; x < 10; x++) mid += at(x, y) == 5;
+	assert(mid > 3 && mid < 13);
+	// gradient stays inside the connected area
+	doc_new(&d, 6, 1);
+	doc_pixels(&d)[3] = 7;
+	tools_begin(&d, MIRROR_OFF);
+	tools_gradient_fill(0, 0, 0, 0, 5);
+	assert(at(0, 0) == 5 && at(3, 0) == 7 && at(5, 0) == 0);
+
 	doc_free(&d);
 	hist_clear();
 	puts("ok");

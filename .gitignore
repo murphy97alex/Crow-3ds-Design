@@ -32,3 +32,7 @@ out.png
 st.pxd
 v1.pxd
 lk.pxd
+layers.pxd
+imp.png
+test_layers
+test_import

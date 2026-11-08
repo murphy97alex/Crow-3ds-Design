@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#include "png.h"
+#include "export_png.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,15 +23,17 @@ const char* png_export(const Doc* d, int frame, int outW, int outH, const char* 
 {
 	if (outW < 1 || outH < 1 || outW > PNG_MAX_DIM || outH > PNG_MAX_DIM)
 		return "Bad size";
-	const uint8_t* src = d->frames[frame];
+	uint32_t* src = malloc((size_t)d->w * d->h * 4);
+	if (!src) return "Out of memory";
+	doc_composite(d, frame, src);
 	size_t rowLen = (size_t)outW * 4 + 1;
 	uint8_t* row = malloc(rowLen);
 	enum { OUT_CHUNK = 64 * 1024 };
 	uint8_t* out = malloc(OUT_CHUNK);
-	if (!row || !out) { free(row); free(out); return "Out of memory"; }
+	if (!row || !out) { free(row); free(out); free(src); return "Out of memory"; }
 
 	FILE* f = fopen(path, "wb");
-	if (!f) { free(row); free(out); return "Can't open file"; }
+	if (!f) { free(row); free(out); free(src); return "Can't open file"; }
 
 	static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
 	uint8_t ihdr[13];
@@ -57,8 +59,7 @@ const char* png_export(const Doc* d, int frame, int outW, int outH, const char* 
 			for (int x = 0; x < outW; x++)
 			{
 				int sx = (int)((long)x * d->w / outW);
-				uint8_t v = src[sy * d->w + sx];
-				uint32_t c = doc_color(d, v);
+				uint32_t c = src[sy * d->w + sx];
 				uint8_t* p = row + 1 + x * 4;
 				p[0] = c >> 24; p[1] = c >> 16; p[2] = c >> 8; p[3] = c;
 			}
@@ -82,6 +83,7 @@ const char* png_export(const Doc* d, int frame, int outW, int outH, const char* 
 	ok = (fclose(f) == 0) && ok;
 	free(row);
 	free(out);
+	free(src);
 	if (!ok) { remove(path); return "Write failed"; }
 	return NULL;
 }

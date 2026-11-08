@@ -10,10 +10,12 @@ void gfx_frame_begin(void);  // resets the per-frame text buffer
 
 // Canvas texture mirrors the current frame of the document.
 void gfx_canvas_rebuild(const Doc* d);
-void gfx_canvas_set(const Doc* d, int x, int y);
 void gfx_canvas_flush(void);
 // Draw the canvas (with checkerboard behind transparent pixels) at (x,y), scaled.
 void gfx_draw_canvas(const Doc* d, float x, float y, float scale, float clipY0, float clipY1);
+
+// Unclipped canvas draw for previews; flipX mirrors it left-right.
+void gfx_draw_canvas_ex(const Doc* d, float x, float y, float scale, bool flipX);
 
 // Checkerboard rectangle, cell = checker square size in screen pixels.
 void gfx_draw_checker(float x, float y, float w, float h, float cell);

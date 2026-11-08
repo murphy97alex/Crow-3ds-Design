@@ -11,8 +11,10 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | START → Linked swatches | Per project. On: editing a swatch also recolors every pixel of that color (like Aseprite's indexed mode). Off by default |
 | Hold R + tap a swatch | Save the current color (e.g. from the eyedropper) into that swatch |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror axis) |
-| D-pad up/down | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper. Last entry **Mirror** opens Mirror On/Off + axis, which applies to all drawing tools and stamps |
-| Select tool | Drag to select; drag inside to move; A = actions (copy, cut, paste, delete, flip, rotate, outline, save as stamp); B deselects |
+| D-pad up/down | Previous / next tool: Pencil, Eraser, Fill, Shade, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper. Last entry **Mirror** opens Mirror On/Off + axis, which applies to all drawing tools and stamps |
+| Select tool | Mode (A): Rectangle, Magic wand (connected or all of a color), Lasso. Drag inside a selection to move it. A = actions (copy, cut, paste, delete, flip, rotate, outline, crop canvas to selection, save as stamp); B deselects |
+| Fill tool | Mode (A): Connected area, Replace color, or Gradient: drag to fade the current color into the area with a 4x4 dither |
+| Shade tool | Paint over pixels to step them one swatch lighter (right) or darker (left); A sets direction and brush |
 | Stamp tool | A: pick a stamp, Size Original or Drag to size. Original: touch to place, drag to position. Drag to size: drag a box to scale it (ZR keeps proportions); a tap places it at original size |
 | Hold R + stylus | Eyedropper |
 | Hold ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 |
@@ -22,12 +24,14 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | B | Toggle eraser (back to your previous tool on the next press). In Select it deselects; while dragging a shape it cancels |
 | Circle pad | Pan |
 | X | Grid on/off (zoom 4x and up) |
-| Y | Layers menu (coming with the Layers update) |
+| Y | Layers: up/down pick, X show/hide, left/right opacity, L/R move, A = new layer/folder, duplicate, delete, move, merge down/visible, lock, rename, collapse folder |
+| Bottom row of the palette strip | Recent colors (tap to reuse) |
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… |
-| START | Menu: new canvas, save, save as, open, export PNG, shift canvas (wrap), exit |
+| START | Menu: new canvas, save, save as, open, import PNG, export PNG, canvas size (with anchor), shift layer, Colors (ramp between swatches, adjust hue/saturation/brightness/invert), View (flip preview, 3x3 tile preview, HUD grid, isometric grid, autosave), linked swatches, exit |
 
 Projects are saved to `/3ds/pixel-ui-designer/projects/*.pxd` ([format](docs/PXD.md)),
-stamps to `/3ds/pixel-ui-designer/stamps/`, and PNG exports to `/3ds/pixel-ui-designer/export/`
+stamps to `/3ds/pixel-ui-designer/stamps/`, PNG exports to `/3ds/pixel-ui-designer/export/`,
+and PNGs to import go in `/3ds/pixel-ui-designer/import/`
 (named `<project>_<W>x<H>.png`) — grab them with ftpd.
 
 ## Install

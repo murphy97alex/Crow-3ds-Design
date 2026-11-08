@@ -12,13 +12,32 @@ static Mirror floatMirror = MIRROR_OFF;
 
 void sel_set_float_mirror(Mirror m) { floatMirror = m; }
 static int clipW, clipH;
+static uint8_t* mask;                // sel.w * sel.h, NULL = whole rectangle (not floating)
+static bool keepMask;                // re-derive the mask from the pixels after a move
 
 bool sel_active(void) { return active; }
 bool sel_floating(void) { return floating; }
 Rect sel_rect(void) { return sel; }
+bool sel_has_mask(void) { return mask != NULL; }
+bool sel_mask_at(int i, int j)
+{
+	if (i < 0 || j < 0 || i >= sel.w || j >= sel.h) return false;
+	if (floating && keepMask && flt) return flt[j * sel.w + i] != PIX_TRANSPARENT;
+	return !mask || mask[j * sel.w + i];
+}
+
 bool sel_contains(int x, int y)
 {
-	return active && x >= sel.x && y >= sel.y && x < sel.x + sel.w && y < sel.y + sel.h;
+	if (!active || x < sel.x || y < sel.y || x >= sel.x + sel.w || y >= sel.y + sel.h)
+		return false;
+	return sel_mask_at(x - sel.x, y - sel.y);
+}
+
+static void drop_mask(void)
+{
+	free(mask);
+	mask = NULL;
+	keepMask = false;
 }
 
 static uint8_t before[DOC_MAX_W * DOC_MAX_H]; // frame before the current lift/paste/shift
@@ -42,6 +61,7 @@ void sel_set(Doc* d, int x0, int y0, int x1, int y1)
 	if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
 	x0 = clampi(x0, 0, d->w - 1); x1 = clampi(x1, 0, d->w - 1);
 	y0 = clampi(y0, 0, d->h - 1); y1 = clampi(y1, 0, d->h - 1);
+	drop_mask();
 	sel = (Rect){ x0, y0, x1 - x0 + 1, y1 - y0 + 1 };
 	active = true;
 }
@@ -52,6 +72,7 @@ void sel_clear(Doc* d)
 {
 	if (floating)
 		sel_commit(d);
+	drop_mask();
 	active = false;
 }
 
@@ -61,6 +82,7 @@ void sel_reset(void)
 	floating = active = false;
 	free(flt);
 	flt = NULL;
+	drop_mask();
 	free(clip);   // pixel values only make sense in the document they came from
 	clip = NULL;
 }
@@ -112,10 +134,18 @@ void sel_lift(Doc* d)
 	if (!p) return;
 	uint8_t* px = doc_pixels(d);
 	for (int j = 0; j < sel.h; j++)
-		memcpy(p + j * sel.w, px + (sel.y + j) * d->w + sel.x, sel.w);
+		for (int i = 0; i < sel.w; i++)
+			p[j * sel.w + i] = sel_mask_at(i, j) ? px[(sel.y + j) * d->w + sel.x + i] : PIX_TRANSPARENT;
+	bool hadMask = mask != NULL;
+	uint8_t* m = mask;
+	mask = NULL;
 	float_start(d, p, sel);
 	for (int j = 0; j < sel.h; j++)               // hole where the pixels were
-		memset(base + (sel.y + j) * d->w + sel.x, PIX_TRANSPARENT, sel.w);
+		for (int i = 0; i < sel.w; i++)
+			if (!m || m[j * sel.w + i])
+				base[(sel.y + j) * d->w + sel.x + i] = PIX_TRANSPARENT;
+	free(m);
+	keepMask = hadMask;
 	render(d);
 }
 
@@ -126,6 +156,7 @@ void sel_float_pixels(Doc* d, const uint8_t* src, int w, int h, int x, int y)
 	uint8_t* p = malloc((size_t)w * h);
 	if (!p) return;
 	memcpy(p, src, (size_t)w * h);
+	drop_mask();
 	float_start(d, p, (Rect){ x, y, w, h });
 	render(d);
 }
@@ -158,15 +189,27 @@ void sel_commit(Doc* d)
 	else hist_abort();
 	floating = false;
 	floatMirror = MIRROR_OFF;
-	free(flt);
-	flt = NULL;
 	// keep the selection on the visible part of the canvas
 	int x0 = clampi(sel.x, 0, d->w - 1), y0 = clampi(sel.y, 0, d->h - 1);
 	int x1 = clampi(sel.x + sel.w - 1, 0, d->w - 1), y1 = clampi(sel.y + sel.h - 1, 0, d->h - 1);
 	if (sel.x + sel.w <= 0 || sel.y + sel.h <= 0 || sel.x >= d->w || sel.y >= d->h)
 		active = false;
 	else
-		sel = (Rect){ x0, y0, x1 - x0 + 1, y1 - y0 + 1 };
+	{
+		Rect old = sel;
+		Rect r = { x0, y0, x1 - x0 + 1, y1 - y0 + 1 };
+		uint8_t* m = NULL;
+		if (keepMask && flt && (m = malloc((size_t)r.w * r.h)))
+			for (int j = 0; j < r.h; j++)
+				for (int i = 0; i < r.w; i++)
+					m[j * r.w + i] = flt[(r.y - old.y + j) * old.w + (r.x - old.x + i)] != PIX_TRANSPARENT;
+		drop_mask();
+		mask = m;
+		sel = r;
+	}
+	free(flt);
+	flt = NULL;
+	keepMask = false;
 }
 
 
@@ -307,12 +350,116 @@ bool sel_get_pixels(Doc* d, uint8_t** out, int* w, int* h)
 	{
 		uint8_t* px = doc_pixels(d);
 		for (int j = 0; j < sel.h; j++)
-			memcpy(p + j * sel.w, px + (sel.y + j) * d->w + sel.x, sel.w);
+			for (int i = 0; i < sel.w; i++)
+				p[j * sel.w + i] = sel_mask_at(i, j) ? px[(sel.y + j) * d->w + sel.x + i] : PIX_TRANSPARENT;
 	}
 	*out = p;
 	*w = sel.w;
 	*h = sel.h;
 	return true;
+}
+
+// ---- shaped selections ---------------------------------------------------------
+
+// Use a full-canvas mask as the selection (cropped to its bounding box).
+static void set_from_canvas_mask(Doc* d, const uint8_t* full)
+{
+	int x0 = d->w, y0 = d->h, x1 = -1, y1 = -1;
+	for (int y = 0; y < d->h; y++)
+		for (int x = 0; x < d->w; x++)
+			if (full[y * d->w + x])
+			{
+				if (x < x0) x0 = x;
+				if (x > x1) x1 = x;
+				if (y < y0) y0 = y;
+				if (y > y1) y1 = y;
+			}
+	if (x1 < 0) { sel_clear(d); return; }
+	sel_set(d, x0, y0, x1, y1);   // also drops floating pixels and the old mask
+	uint8_t* m = malloc((size_t)sel.w * sel.h);
+	if (!m) return;
+	bool full_rect = true;
+	for (int j = 0; j < sel.h; j++)
+		for (int i = 0; i < sel.w; i++)
+			full_rect &= (m[j * sel.w + i] = full[(y0 + j) * d->w + x0 + i]) != 0;
+	if (full_rect) free(m);
+	else mask = m;
+}
+
+void sel_wand(Doc* d, int x, int y, bool allOfColor)
+{
+	if (x < 0 || y < 0 || x >= d->w || y >= d->h) return;
+	if (floating) sel_commit(d);
+	const uint8_t* px = doc_pixels(d);
+	int w = d->w, h = d->h;
+	uint8_t target = px[y * w + x];
+	uint8_t* full = calloc((size_t)w * h, 1);
+	if (!full) return;
+	if (allOfColor)
+		for (int i = 0; i < w * h; i++) full[i] = px[i] == target;
+	else
+	{
+		int* stack = malloc(sizeof(int) * w * h);
+		if (!stack) { free(full); return; }
+		int sp = 0;
+		stack[sp++] = y * w + x;
+		full[y * w + x] = 1;
+		while (sp > 0)
+		{
+			int k = stack[--sp], kx = k % w, ky = k / w;
+			int nb[4] = { kx > 0 ? k - 1 : -1, kx < w - 1 ? k + 1 : -1, ky > 0 ? k - w : -1, ky < h - 1 ? k + w : -1 };
+			for (int q = 0; q < 4; q++)
+				if (nb[q] >= 0 && !full[nb[q]] && px[nb[q]] == target)
+				{
+					full[nb[q]] = 1;
+					stack[sp++] = nb[q];
+				}
+		}
+		free(stack);
+	}
+	set_from_canvas_mask(d, full);
+	free(full);
+}
+
+void sel_lasso(Doc* d, const int* pts, int n)
+{
+	if (n < 1) return;
+	if (floating) sel_commit(d);
+	int w = d->w, h = d->h;
+	uint8_t* full = calloc((size_t)w * h, 1);
+	if (!full) return;
+	// inside test at pixel centers (even-odd rule)
+	if (n >= 3)
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < w; x++)
+			{
+				float px = x + 0.5f, py = y + 0.5f;
+				bool in = false;
+				for (int i = 0, j = n - 1; i < n; j = i++)
+				{
+					float xi = pts[i * 2] + 0.5f, yi = pts[i * 2 + 1] + 0.5f;
+					float xj = pts[j * 2] + 0.5f, yj = pts[j * 2 + 1] + 0.5f;
+					if ((yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+						in = !in;
+				}
+				full[y * w + x] = in;
+			}
+	// plus the path itself, so thin lassos still select what they touch
+	for (int i = 0; i < n; i++)
+	{
+		int x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[((i + 1) % n) * 2], y1 = pts[((i + 1) % n) * 2 + 1];
+		int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1, err = dx + dy;
+		for (;;)
+		{
+			if (x0 >= 0 && y0 >= 0 && x0 < w && y0 < h) full[y0 * w + x0] = 1;
+			if (x0 == x1 && y0 == y1) break;
+			int e2 = 2 * err;
+			if (e2 >= dy) { err += dy; x0 += sx; }
+			if (e2 <= dx) { err += dx; y0 += sy; }
+		}
+	}
+	set_from_canvas_mask(d, full);
+	free(full);
 }
 
 // ---- shift -----------------------------------------------------------------------

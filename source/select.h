@@ -10,6 +10,12 @@ bool sel_active(void);
 bool sel_floating(void);
 Rect sel_rect(void);                 // selection or floating rect, canvas coords
 bool sel_contains(int x, int y);
+bool sel_has_mask(void);             // false = the whole rectangle is selected
+bool sel_mask_at(int i, int j);      // inside the selection, relative to sel_rect()
+
+// Shaped selections on the current layer (replace the current selection).
+void sel_wand(Doc* d, int x, int y, bool allOfColor);  // same color, connected or everywhere
+void sel_lasso(Doc* d, const int* pts, int n);         // closed polygon, pts = x0,y0,x1,y1...
 
 void sel_set(Doc* d, int x0, int y0, int x1, int y1); // corners, inclusive; clamped
 void sel_all(Doc* d);
