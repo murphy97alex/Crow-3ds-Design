@@ -11,12 +11,42 @@ int main(void)
 	Doc a = {0}, b = {0};
 	assert(doc_new(&a, 48, 30));
 	for (int i = 0; i < 48 * 30; i++) a.frames[0][i] = (i * 7 / 13) % 33;
-	a.palette[3] = 0x12345678;
+	a.colorCount = 32;
+	for (int i = 1; i <= 32; i++) a.colors[i] = 0x01020300u * i | 0xFF;
+	a.swatches[3] = 0x12345678;
 	a.frames[1] = calloc(48 * 30, 1); a.frames[1][5] = 9; a.frameCount = 2;
 	assert(pxd_save(&a, "test.pxd") == NULL);
 	assert(pxd_load(&b, "test.pxd") == NULL);
-	assert(b.w == 48 && b.h == 30 && b.frameCount == 2 && b.palette[3] == 0x12345678);
+	assert(b.w == 48 && b.h == 30 && b.frameCount == 2 && b.swatches[3] == 0x12345678 && b.colorCount == 32 && b.colors[7] == a.colors[7]);
 	assert(!memcmp(a.frames[0], b.frames[0], 48 * 30) && !memcmp(a.frames[1], b.frames[1], 48 * 30));
+
+	// color table: find/add, compaction when full, nearest fallback
+	Doc e = {0}; doc_new(&e, 4, 1);
+	assert(e.colorCount == 0);
+	uint8_t red = doc_color_index(&e, 0xFF0000FF, true);
+	assert(red == 1 && doc_color_index(&e, 0xFF0000FF, true) == 1 && e.colorCount == 1);
+	for (int i = 0; i < 300; i++) e.frames[0][i % 4] = doc_color_index(&e, 0x00000AFF + ((uint32_t)i << 8), true);
+	assert(e.colorCount <= DOC_MAX_COLORS);
+	for (int x = 0; x < 4; x++) assert(doc_color(&e, e.frames[0][x]) == 0x00000AFF + ((uint32_t)(296 + x) << 8));
+	doc_free(&e);
+
+	// version 1 file: 32-entry palette is both color table and swatches
+	{
+		FILE* f = fopen("v1.pxd", "wb");
+		uint8_t head[16] = { 1, 0, 2, 0, 1, 0, 1, 0, 8, 0 };
+		uint8_t pal[128] = {0}; pal[0] = 0xFF; pal[3] = 0xAA; // color 1 = 0xAA0000FF
+		uint8_t fr[] = { 0, 0, 1, 0, 1, 1, 1, 0 };            // pixels: 1, 0
+		fwrite("PXD\x1A", 1, 4, f);
+		fwrite("HEAD\x10\0\0\0", 1, 8, f); fwrite(head, 1, 16, f);
+		fwrite("PALT\x80\0\0\0", 1, 8, f); fwrite(pal, 1, 128, f);
+		fwrite("FRAM\x08\0\0\0", 1, 8, f); fwrite(fr, 1, 8, f);
+		fwrite("END \0\0\0\0", 1, 8, f); fclose(f);
+		Doc v = {0};
+		assert(pxd_load(&v, "v1.pxd") == NULL);
+		assert(v.colorCount == 32 && doc_color(&v, v.frames[0][0]) == 0xAA0000FF && v.frames[0][1] == 0);
+		assert(v.swatches[0] == 0xAA0000FF);
+		doc_free(&v);
+	}
 
 	// undo/redo
 	Doc c = {0}; doc_new(&c, 4, 4);

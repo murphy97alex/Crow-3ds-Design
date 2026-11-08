@@ -76,18 +76,20 @@ int main(void)
 
 	// PNG export: 2x2 doc, scaled 3x
 	doc_new(&d, 2, 2); sel_reset();
-	doc_pixels(&d)[0] = 1; doc_pixels(&d)[3] = 9;
+	doc_pixels(&d)[0] = doc_color_index(&d, 0x000000FF, true);
+	doc_pixels(&d)[3] = doc_color_index(&d, 0xE8463CFF, true);
 	assert(png_export(&d, 0, 6, 6, "out.png") == NULL);
 
-	// stamps: save with this palette, load into a palette where colors moved
-	assert(stamp_save(".", "st", doc_pixels(&d), 2, 2, d.palette) == NULL);
-	uint32_t pal2[DOC_PALETTE_SIZE];
-	memcpy(pal2, d.palette, sizeof(pal2));
-	uint32_t t = pal2[0]; pal2[0] = pal2[20]; pal2[20] = t; // black now at slot 21
+	// stamps: colors carry over exactly into another document's color table
+	assert(stamp_save(".", "st", doc_pixels(&d), 2, 2, &d) == NULL);
+	Doc o = {0}; doc_new(&o, 4, 4);
+	doc_color_index(&o, 0x123456FF, true);              // o already has one color
 	uint8_t* px; int w, h;
-	assert(stamp_load(".", "st", pal2, &px, &w, &h) == NULL);
-	assert(w == 2 && h == 2 && px[0] == 21 && px[1] == 0 && px[3] == 9);
+	assert(stamp_load(".", "st", &o, &px, &w, &h) == NULL);
+	assert(w == 2 && h == 2 && px[1] == 0 && px[2] == 0);
+	assert(doc_color(&o, px[0]) == 0x000000FF && doc_color(&o, px[3]) == 0xE8463CFF && o.colorCount == 3);
 	free(px);
+	doc_free(&o);
 	char names[8][DOC_NAME_MAX];
 	assert(stamp_list(".", names, 8) >= 1);
 

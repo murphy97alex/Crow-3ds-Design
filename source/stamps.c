@@ -8,36 +8,23 @@
 #include <strings.h>
 
 const char* stamp_save(const char* dir, const char* name, const uint8_t* px, int w, int h,
-                       const uint32_t* palette)
+                       const Doc* src)
 {
 	Doc s = {0};
 	s.w = w;
 	s.h = h;
 	s.fps = 8;
 	s.frameCount = 1;
-	memcpy(s.palette, palette, sizeof(s.palette));
+	memcpy(s.swatches, src->swatches, sizeof(s.swatches));
+	memcpy(s.colors, src->colors, sizeof(s.colors));
+	s.colorCount = src->colorCount;
 	s.frames[0] = (uint8_t*)px;
 	char path[256];
 	snprintf(path, sizeof(path), "%s/%s.pxd", dir, name);
 	return pxd_save(&s, path);
 }
 
-static int nearest(uint32_t c, const uint32_t* pal)
-{
-	int best = 0;
-	long bestD = -1;
-	for (int i = 0; i < DOC_PALETTE_SIZE; i++)
-	{
-		long dr = (long)((c >> 24) & 255) - ((pal[i] >> 24) & 255);
-		long dg = (long)((c >> 16) & 255) - ((pal[i] >> 16) & 255);
-		long db = (long)((c >> 8) & 255) - ((pal[i] >> 8) & 255);
-		long dist = dr * dr * 3 + dg * dg * 4 + db * db * 2;
-		if (bestD < 0 || dist < bestD) { bestD = dist; best = i; }
-	}
-	return best;
-}
-
-const char* stamp_load(const char* dir, const char* name, const uint32_t* palette,
+const char* stamp_load(const char* dir, const char* name, Doc* target,
                        uint8_t** px, int* w, int* h)
 {
 	char path[256];
@@ -45,11 +32,17 @@ const char* stamp_load(const char* dir, const char* name, const uint32_t* palett
 	Doc s = {0};
 	const char* err = pxd_load(&s, path);
 	if (err) return err;
-	uint8_t map[DOC_PALETTE_SIZE + 1];
-	map[PIX_TRANSPARENT] = PIX_TRANSPARENT;
-	for (int i = 0; i < DOC_PALETTE_SIZE; i++)
-		map[i + 1] = nearest(s.palette[i], palette) + 1;
 	size_t n = (size_t)s.w * s.h;
+	bool used[DOC_MAX_COLORS + 1] = { false };
+	int usedCount = 0;
+	for (size_t i = 0; i < n; i++)
+		if (s.frames[0][i] && !used[s.frames[0][i]]) { used[s.frames[0][i]] = true; usedCount++; }
+	if (target->colorCount + usedCount > DOC_MAX_COLORS)
+		doc_compact(target);
+	uint8_t map[DOC_MAX_COLORS + 1] = { 0 };
+	for (int v = 1; v <= s.colorCount; v++)
+		if (used[v])
+			map[v] = doc_color_index(target, s.colors[v], false);
 	uint8_t* out = malloc(n);
 	if (!out) { doc_free(&s); return "Out of memory"; }
 	for (size_t i = 0; i < n; i++)

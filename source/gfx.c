@@ -50,7 +50,7 @@ void gfx_frame_begin(void) { C2D_TextBufClear(textBuf); }
 
 static inline u32 pix_color(const Doc* d, uint8_t v)
 {
-	return v == PIX_TRANSPARENT ? 0x00000000 : d->palette[v - 1];
+	return doc_color(d, v);
 }
 
 void gfx_canvas_set(const Doc* d, int x, int y)

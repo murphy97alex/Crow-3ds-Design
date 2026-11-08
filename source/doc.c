@@ -29,7 +29,8 @@ bool doc_new(Doc* d, int w, int h)
 	d->w = w;
 	d->h = h;
 	d->fps = 8;
-	memcpy(d->palette, DOC_DEFAULT_PALETTE, sizeof(d->palette));
+	memcpy(d->swatches, DOC_DEFAULT_PALETTE, sizeof(d->swatches));
+	d->colorCount = 0;
 	d->frameCount = 1;
 	d->curFrame = 0;
 	d->frames[0] = px;
@@ -37,6 +38,55 @@ bool doc_new(Doc* d, int w, int h)
 	d->dirty = false;
 	hist_clear();
 	return true;
+}
+
+static long color_dist(uint32_t a, uint32_t b)
+{
+	long dr = (long)((a >> 24) & 255) - ((b >> 24) & 255);
+	long dg = (long)((a >> 16) & 255) - ((b >> 16) & 255);
+	long db = (long)((a >> 8) & 255) - ((b >> 8) & 255);
+	return dr * dr * 3 + dg * dg * 4 + db * db * 2;
+}
+
+void doc_compact(Doc* d)
+{
+	bool used[DOC_MAX_COLORS + 1] = { false };
+	size_t n = (size_t)d->w * d->h;
+	for (int f = 0; f < d->frameCount; f++)
+		for (size_t i = 0; i < n; i++)
+			used[d->frames[f][i]] = true;
+	uint8_t remap[DOC_MAX_COLORS + 1] = { 0 };
+	int count = 0;
+	for (int v = 1; v <= d->colorCount; v++)
+		if (used[v])
+		{
+			d->colors[++count] = d->colors[v];
+			remap[v] = count;
+		}
+	for (int f = 0; f < d->frameCount; f++)
+		for (size_t i = 0; i < n; i++)
+			d->frames[f][i] = remap[d->frames[f][i]];
+	d->colorCount = count;
+}
+
+uint8_t doc_color_index(Doc* d, uint32_t rgba, bool allowCompact)
+{
+	rgba |= 0xFF;  // drawing colors are opaque
+	for (int v = 1; v <= d->colorCount; v++)
+		if (d->colors[v] == rgba)
+			return v;
+	if (d->colorCount >= DOC_MAX_COLORS && allowCompact)
+		doc_compact(d);
+	if (d->colorCount < DOC_MAX_COLORS)
+	{
+		d->colors[++d->colorCount] = rgba;
+		return d->colorCount;
+	}
+	int best = 1;
+	for (int v = 2; v <= d->colorCount; v++)
+		if (color_dist(d->colors[v], rgba) < color_dist(d->colors[best], rgba))
+			best = v;
+	return best;
 }
 
 void doc_free(Doc* d)
@@ -55,7 +105,8 @@ void doc_free(Doc* d)
 
 typedef struct {
 	int frame;
-	uint32_t palette[DOC_PALETTE_SIZE];
+	uint32_t colors[DOC_MAX_COLORS + 1];
+	int colorCount;
 	uint8_t* px;
 } Snap;
 
@@ -87,7 +138,8 @@ static bool snap_take(Snap* s, const Doc* d)
 	if (!s->px)
 		return false;
 	memcpy(s->px, d->frames[d->curFrame], n);
-	memcpy(s->palette, d->palette, sizeof(s->palette));
+	memcpy(s->colors, d->colors, sizeof(s->colors));
+	s->colorCount = d->colorCount;
 	s->frame = d->curFrame;
 	return true;
 }
@@ -95,7 +147,8 @@ static bool snap_take(Snap* s, const Doc* d)
 static void snap_restore(Snap* s, Doc* d)
 {
 	memcpy(d->frames[s->frame], s->px, (size_t)d->w * d->h);
-	memcpy(d->palette, s->palette, sizeof(d->palette));
+	memcpy(d->colors, s->colors, sizeof(d->colors));
+	d->colorCount = s->colorCount;
 	d->curFrame = s->frame;
 	snap_free(s);
 }

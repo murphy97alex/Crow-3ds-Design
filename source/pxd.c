@@ -71,10 +71,14 @@ const char* pxd_save(const Doc* d, const char* path)
 	put16(head + 10, 0); // flags
 	ok = ok && write_chunk(f, "HEAD", head, sizeof(head));
 
-	uint8_t pal[DOC_PALETTE_SIZE * 4];
+	uint8_t pal[DOC_MAX_COLORS * 4];
+	for (int i = 0; i < d->colorCount; i++)
+		put32(pal + i * 4, d->colors[i + 1]);
+	ok = ok && write_chunk(f, "PALT", pal, d->colorCount * 4);
+	uint8_t sw[DOC_PALETTE_SIZE * 4];
 	for (int i = 0; i < DOC_PALETTE_SIZE; i++)
-		put32(pal + i * 4, d->palette[i]);
-	ok = ok && write_chunk(f, "PALT", pal, sizeof(pal));
+		put32(sw + i * 4, d->swatches[i]);
+	ok = ok && write_chunk(f, "SWAT", sw, sizeof(sw));
 
 	for (int fr = 0; ok && fr < d->frameCount; fr++)
 	{
@@ -110,7 +114,7 @@ const char* pxd_load(Doc* d, const char* path)
 
 	Doc nd = {0};
 	const char* err = NULL;
-	bool gotHead = false, gotEnd = false;
+	bool gotHead = false, gotEnd = false, gotSwatches = false;
 	int frames = 0, expectFrames = 0;
 	uint32_t n = 0;
 
@@ -133,13 +137,20 @@ const char* pxd_load(Doc* d, const char* path)
 			    expectFrames < 1 || expectFrames > DOC_MAX_FRAMES)
 				{ err = "Unsupported size"; break; }
 			n = (uint32_t)nd.w * nd.h;
-			memcpy(nd.palette, DOC_DEFAULT_PALETTE, sizeof(nd.palette));
+			memcpy(nd.swatches, DOC_DEFAULT_PALETTE, sizeof(nd.swatches));
 			gotHead = true;
 		}
 		else if (!memcmp(id, "PALT", 4))
 		{
+			nd.colorCount = 0;
+			for (uint32_t i = 0; i < len / 4 && i < DOC_MAX_COLORS; i++)
+				nd.colors[++nd.colorCount] = get32(body + i * 4);
+		}
+		else if (!memcmp(id, "SWAT", 4))
+		{
 			for (uint32_t i = 0; i < len / 4 && i < DOC_PALETTE_SIZE; i++)
-				nd.palette[i] = get32(body + i * 4);
+				nd.swatches[i] = get32(body + i * 4);
+			gotSwatches = true;
 		}
 		else if (!memcmp(id, "FRAM", 4))
 		{
@@ -150,7 +161,7 @@ const char* pxd_load(Doc* d, const char* path)
 			nd.frames[frames++] = px;
 			if (!rle_decode(body + 4, len - 4, px, n)) { err = "Corrupt frame"; break; }
 			for (uint32_t i = 0; i < n; i++)
-				if (px[i] > DOC_PALETTE_SIZE) px[i] = PIX_TRANSPARENT;
+				if (px[i] > nd.colorCount) px[i] = PIX_TRANSPARENT;
 		}
 		else if (!memcmp(id, "END ", 4))
 			gotEnd = true;
@@ -159,6 +170,10 @@ const char* pxd_load(Doc* d, const char* path)
 	}
 	free(data);
 
+	// version 1 files: the palette was both the color table and the swatches
+	if (!gotSwatches)
+		for (int i = 0; i < DOC_PALETTE_SIZE && i < nd.colorCount; i++)
+			nd.swatches[i] = nd.colors[i + 1];
 	if (!err && (!gotHead || frames != expectFrames))
 		err = "Missing data";
 	nd.frameCount = frames;

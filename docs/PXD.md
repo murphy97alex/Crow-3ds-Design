@@ -1,4 +1,4 @@
-# `.pxd` project file format (version 1)
+# `.pxd` project file format (version 2)
 
 One file per project, saved to `sdmc:/3ds/pixel-ui-designer/projects/<name>.pxd`.
 All integers are little-endian.
@@ -14,12 +14,16 @@ without breaking old files. A file ends with an `END ` chunk.
 | Chunk | Payload |
 |-------|---------|
 | `HEAD` | u16 version (1), u16 width, u16 height, u16 frame count, u16 fps, u16 flags (0), 4 bytes reserved |
-| `PALT` | up to 32 colors, u32 each, `0xRRGGBBAA` |
+| `PALT` | color table: up to 255 colors, u32 each, `0xRRGGBBAA`. Pixel value *n* uses entry *n* (1-based) |
+| `SWAT` | the 32 swatches shown in the palette strip, u32 each. Saved colors only; pixels never refer to them |
 | `FRAM` | one per frame, in order: u16 duration ms (0 = use fps), u8 encoding (1 = RLE), u8 reserved, pixel data |
 | `END ` | empty |
 
 **Pixels** are one byte each, row-major, top-left first: `0` = transparent,
-`1..32` = palette slot 1..32.
+`1..255` = color table entry.
+
+**Version 1** files have no `SWAT` chunk; their 32-color `PALT` is used as both the color
+table and the swatches.
 
 **RLE** (encoding 1): pairs of `count` (u8, 1–255) and `value` (u8). The runs must add
 up to exactly width × height.

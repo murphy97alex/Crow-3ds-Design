@@ -58,7 +58,7 @@ const char* png_export(const Doc* d, int frame, int outW, int outH, const char* 
 			{
 				int sx = (int)((long)x * d->w / outW);
 				uint8_t v = src[sy * d->w + sx];
-				uint32_t c = v == PIX_TRANSPARENT ? 0 : d->palette[v - 1];
+				uint32_t c = doc_color(d, v);
 				uint8_t* p = row + 1 + x * 4;
 				p[0] = c >> 24; p[1] = c >> 16; p[2] = c >> 8; p[3] = c;
 			}

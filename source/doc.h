@@ -1,4 +1,4 @@
-// Document model: canvas size, palette, frames of indexed pixels, undo history.
+// Document model: canvas size, swatches, color table, frames of indexed pixels, undo history.
 // SPDX-License-Identifier: MIT
 #pragma once
 #include <stdbool.h>
@@ -6,17 +6,21 @@
 
 #define DOC_MAX_W 320
 #define DOC_MAX_H 240
-#define DOC_PALETTE_SIZE 32
+#define DOC_PALETTE_SIZE 32   // swatches shown in the palette strip
+#define DOC_MAX_COLORS 255    // distinct colors a drawing can use
 #define DOC_MAX_FRAMES 64
 #define DOC_NAME_MAX 48
 
-// Pixel values: 0 = transparent, 1..DOC_PALETTE_SIZE = palette slot (value - 1).
+// Pixel values: 0 = transparent, 1..colorCount = colors[value].
+// Swatches are just saved colors (like Photoshop/Clip Studio): editing one never changes the art.
 #define PIX_TRANSPARENT 0
 
 typedef struct {
 	uint16_t w, h;
 	uint16_t fps;                         // playback speed for v2 animation
-	uint32_t palette[DOC_PALETTE_SIZE];   // 0xRRGGBBAA
+	uint32_t swatches[DOC_PALETTE_SIZE];  // 0xRRGGBBAA
+	uint32_t colors[DOC_MAX_COLORS + 1];  // color table for pixel values; [0] unused
+	int colorCount;
 	int frameCount;
 	int curFrame;
 	uint8_t* frames[DOC_MAX_FRAMES];      // each w*h bytes
@@ -34,8 +38,18 @@ static inline uint8_t doc_get(const Doc* d, int x, int y)
 {
 	return d->frames[d->curFrame][y * d->w + x];
 }
+static inline uint32_t doc_color(const Doc* d, uint8_t v)
+{
+	return v == PIX_TRANSPARENT || v > d->colorCount ? 0 : d->colors[v];
+}
 
-// Undo/redo: whole-frame + palette snapshots, taken before each edit.
+// Pixel value for a color: finds it in the color table or adds it. If the table is full and
+// allowCompact is set, unused entries are removed first (renumbers pixels, so don't allow it
+// while other code holds copies of pixel values); otherwise the nearest existing color is used.
+uint8_t doc_color_index(Doc* d, uint32_t rgba, bool allowCompact);
+void doc_compact(Doc* d);
+
+// Undo/redo: whole-frame + color table snapshots, taken before each edit.
 void hist_clear(void);
 void hist_push(const Doc* d);     // call before an edit; clears redo
 // For strokes: snapshot at stroke start, commit only if something changed.

@@ -7,7 +7,8 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | Input | Action |
 |---|---|
 | Stylus on canvas | Use the current tool |
-| Tap a palette swatch | Pick that color; tap the selected one again to edit it (color square + hue bar, quick-pick palette row, hex, or **Palette text** to type a whole palette) |
+| Tap a swatch | Draw with that color; tap the selected one again to edit it (color square + hue bar, hex, or **Palette text** to type all swatches). Editing a swatch never changes the drawing |
+| Hold R + tap a swatch | Save the current color (e.g. from the eyedropper) into that swatch |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror) |
 | D-pad left/right | Previous / next tool: Pencil, Eraser, Fill, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper |
 | Select tool | Drag to select; drag inside to move; A = actions (copy, cut, paste, delete, flip, rotate, outline, save as stamp); B deselects |
@@ -16,7 +17,7 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | Hold ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 |
 | B while dragging a shape | Cancel the shape |
 | L / ZL | Undo / redo |
-| D-pad up/down | Zoom in / out |
+| D-pad up/down | Zoom in / out (¼x to 24x) |
 | Circle pad | Pan |
 | X | Grid on/off (zoom 4x and up) |
 | Y | Switch to last-used tool |

@@ -46,9 +46,11 @@ Stylus in right hand, frequent actions on left.
   rectangle select + move, copy/paste, flip/rotate 90° (also the basis for stamps);
   mirror drawing (horizontal/vertical symmetry). Eyedropper stays on hold-R.
 - **Buttons:** use the draft layout above for v1; left-handed mirror in Settings.
-- **Colors:** per-project palette, up to 32 slots. Slots are edited with a hex entry
-  and an RGB color wheel. Pixels store a palette index, so editing a slot recolors the art.
-  PNG export is full color.
+- **Colors:** Photoshop/Clip Studio style (changed 2026-11-08 after testing). You draw with a
+  current color; the 32 swatches are saved colors edited with the square + hue bar picker, hex,
+  or palette text. Editing a swatch never changes the drawing. Pixels index a per-project color
+  table (up to 255 colors). Eyedropper picks any canvas color; R + tap a swatch saves the current
+  color into it. Recolor on purpose with Fill → Replace color. PNG export is full color.
 - **Crow display:** unknown for now. Design for full color; display-specific export later.
 - **Project file:** custom binary `.pxd`, one file per project: versioned header, canvas size,
   palette, then a list of frames (compressed indexed pixels). Room to add layers later.

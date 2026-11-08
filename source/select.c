@@ -58,6 +58,8 @@ void sel_reset(void)
 	floating = active = false;
 	free(flt);
 	flt = NULL;
+	free(clip);   // pixel values only make sense in the document they came from
+	clip = NULL;
 }
 
 // Composite: frame = base + floating pixels (transparent pixels don't overwrite).

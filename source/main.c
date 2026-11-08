@@ -86,14 +86,17 @@ typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE } Action;
 static Doc doc;
 static Mode mode = MODE_DRAW;
 static Tool tool = TOOL_PENCIL, lastTool = TOOL_ERASER;
-static int color = 0;          // current palette slot
+static uint32_t curColor;      // the color you draw with (0xRRGGBBAA)
+static int curSwatch = 0;      // swatch it came from, or -1
+static uint8_t strokeValue;    // pixel value for curColor, fixed for the current stroke
 static int zoomIdx;
 static float viewX, viewY;     // canvas coords at the view's top-left corner
 static bool gridOn = true;
 static bool previewMode = false;
 static bool running = true;
 
-static const int ZOOMS[] = { 1, 2, 3, 4, 6, 8, 12, 16, 24 };
+static const float ZOOMS[] = { 0.25f, 0.5f, 1, 2, 3, 4, 6, 8, 12, 16, 24 };
+#define ZOOM_FIT_MIN 2  // index of 1x: "fit to screen" never starts below 1x
 #define ZOOM_COUNT (int)(sizeof(ZOOMS) / sizeof(ZOOMS[0]))
 
 // touch / stroke
@@ -125,7 +128,16 @@ static void set_status(const char* msg)
 
 // ---- view --------------------------------------------------------------------
 
-static int zoom(void) { return ZOOMS[zoomIdx]; }
+static float zoom(void) { return ZOOMS[zoomIdx]; }
+
+static const char* zoom_label(void)
+{
+	static char buf[8];
+	float z = zoom();
+	if (z < 1) snprintf(buf, sizeof(buf), "1/%dx", (int)(1 / z + 0.5f));
+	else snprintf(buf, sizeof(buf), "%dx", (int)z);
+	return buf;
+}
 
 static void view_clamp(void)
 {
@@ -139,8 +151,8 @@ static void view_clamp(void)
 
 static void view_fit(void)
 {
-	zoomIdx = 0;
-	for (int i = ZOOM_COUNT - 1; i >= 0; i--)
+	zoomIdx = ZOOM_FIT_MIN;
+	for (int i = ZOOM_COUNT - 1; i >= ZOOM_FIT_MIN; i--)
 		if (doc.w * ZOOMS[i] <= BOT_W && doc.h * ZOOMS[i] <= VIEW_H)
 		{
 			zoomIdx = i;
@@ -213,7 +225,12 @@ static void eyedrop(int cx, int cy)
 		return;
 	uint8_t v = doc_get(&doc, cx, cy);
 	if (v != PIX_TRANSPARENT)
-		color = v - 1;
+	{
+		curColor = doc_color(&doc, v);
+		curSwatch = -1;
+		for (int i = 0; i < DOC_PALETTE_SIZE; i++)
+			if (doc.swatches[i] == curColor) { curSwatch = i; break; }
+	}
 }
 
 static void after_doc_change(void)
@@ -344,7 +361,7 @@ static void save_stamp(void)
 	if (ask_text("Stamp name", "stamp", name, sizeof(name)))
 	{
 		ensure_dirs();
-		const char* err = stamp_save(STAMP_DIR, name, px, w, h, doc.palette);
+		const char* err = stamp_save(STAMP_DIR, name, px, w, h, &doc);
 		char msg[96];
 		snprintf(msg, sizeof(msg), err ? "Stamp save failed: %s" : "Saved stamp %s", err ? err : name);
 		set_status(msg);
@@ -377,7 +394,7 @@ static void run_option_action(OptKind k)
 	case OPT_FLIPH: sel_flip(&doc, true); break;
 	case OPT_FLIPV: sel_flip(&doc, false); break;
 	case OPT_ROTATE: sel_rotate(&doc); break;
-	case OPT_OUTLINE: sel_outline(&doc, color + 1); break;
+	case OPT_OUTLINE: sel_outline(&doc, doc_color_index(&doc, curColor, !sel_floating())); break;
 	case OPT_SAVESTAMP: save_stamp(); break;
 	default: break;
 	}
@@ -574,7 +591,8 @@ static void new_canvas(int w, int h)
 		set_status("Couldn't create canvas");
 		return;
 	}
-	color = 0;
+	curColor = doc.swatches[0];
+	curSwatch = 0;
 	view_fit();
 	after_doc_change();
 }
@@ -874,7 +892,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	}
 
 	bool dropper = (kHeld & KEY_R) || tool == TOOL_EYEDROPPER;
-	uint8_t value = tool == TOOL_ERASER ? PIX_TRANSPARENT : color + 1;
+	uint8_t value = tool == TOOL_ERASER ? PIX_TRANSPARENT : strokeValue;
 
 	if ((tool == TOOL_SELECT || tool == TOOL_STAMP) && !(kHeld & KEY_R) &&
 	    (touchTarget == TOUCH_CANVAS || ((kDown & KEY_TOUCH) && touch.py >= STRIP_H)))
@@ -891,7 +909,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				uint8_t* px;
 				int w, h;
 				if (!stampCount) { set_status("No stamps yet - save one with Select, A"); selDrag = SEL_IDLE; }
-				else if (stamp_load(STAMP_DIR, stampNames[stampSel], doc.palette, &px, &w, &h)) { set_status("Couldn't load stamp"); selDrag = SEL_IDLE; }
+				else if (stamp_load(STAMP_DIR, stampNames[stampSel], &doc, &px, &w, &h)) { set_status("Couldn't load stamp"); selDrag = SEL_IDLE; }
 				else
 				{
 					moveOffX = w / 2;
@@ -944,14 +962,24 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			int slot = (touch.py / SW_H) * SW_COLS + touch.px / SW_W;
 			if (slot >= 0 && slot < DOC_PALETTE_SIZE)
 			{
-				if (slot == color)
+				if (kHeld & KEY_R)
 				{
-					picker_open(slot, doc.palette[slot], doc.palette);
+					// R + tap a swatch: save the current color into it
+					doc.swatches[slot] = curColor;
+					curSwatch = slot;
+					doc.dirty = true;
+					set_status("Saved color to swatch");
+					return;
+				}
+				if (slot == curSwatch && curColor == doc.swatches[slot])
+				{
+					picker_open(slot, curColor, doc.swatches);
 					mode = MODE_PICKER;
 					touchTarget = TOUCH_NONE;
 					return;
 				}
-				color = slot;
+				curSwatch = slot;
+				curColor = doc.swatches[slot];
 				if (tool == TOOL_ERASER || tool == TOOL_EYEDROPPER)
 					set_tool(TOOL_PENCIL);
 			}
@@ -967,11 +995,14 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				eyedrop(cx, cy);
 			else
 			{
+				// find/add the color first: this may renumber pixels, so do it before snapshots
+				strokeValue = doc_color_index(&doc, curColor, true);
+				value = tool == TOOL_ERASER ? PIX_TRANSPARENT : strokeValue;
 				hist_begin(&doc);
 				tools_begin(&doc, mirrorMode);
 				strokeActive = true;
 				if (tool == TOOL_FILL)
-					tools_fill(cx, cy, color + 1, fillReplace);
+					tools_fill(cx, cy, strokeValue, fillReplace);
 				else if (tool == TOOL_PENCIL || tool == TOOL_ERASER)
 					tools_stroke_start(cx, cy, value, &brushes[tool]);
 				// shapes are drawn below while dragging
@@ -1105,11 +1136,14 @@ static void draw_bottom(void)
 	for (int i = 0; i < DOC_PALETTE_SIZE; i++)
 	{
 		float x = (i % SW_COLS) * SW_W, y = (i / SW_COLS) * SW_H;
-		C2D_DrawRectSolid(x + 1, y + 1, 0.5f, SW_W - 2, SW_H - 2, rgba_to_c2d(doc.palette[i]));
+		C2D_DrawRectSolid(x + 1, y + 1, 0.5f, SW_W - 2, SW_H - 2, rgba_to_c2d(doc.swatches[i]));
 	}
-	float hx = (color % SW_COLS) * SW_W, hy = (color / SW_COLS) * SW_H;
-	gfx_rect_outline(hx, hy, SW_W, SW_H, 2, C2D_Color32(0, 0, 0, 255));
-	gfx_rect_outline(hx + 1, hy + 1, SW_W - 2, SW_H - 2, 1, C2D_Color32(255, 255, 255, 255));
+	if (curSwatch >= 0)
+	{
+		float hx = (curSwatch % SW_COLS) * SW_W, hy = (curSwatch / SW_COLS) * SW_H;
+		gfx_rect_outline(hx, hy, SW_W, SW_H, 2, C2D_Color32(0, 0, 0, 255));
+		gfx_rect_outline(hx + 1, hy + 1, SW_W - 2, SW_H - 2, 1, C2D_Color32(255, 255, 255, 255));
+	}
 
 	// selection marquee
 	if (sel_active())
@@ -1179,12 +1213,16 @@ static void draw_top_tools(void)
 	// color
 	float cy = 40 + TOOL_COUNT * 13 + 5;
 	C2D_DrawRectSolid(10, cy, 0.5f, 22, 22, C_TEXT);
-	C2D_DrawRectSolid(11, cy + 1, 0.5f, 20, 20, rgba_to_c2d(doc.palette[color]));
-	gfx_text(40, cy + 4, 0.5f, C_TEXT, "Color %d  #%06lX", color + 1, (unsigned long)(doc.palette[color] >> 8));
+	C2D_DrawRectSolid(11, cy + 1, 0.5f, 20, 20, rgba_to_c2d(curColor));
+	gfx_text(40, cy + 4, 0.5f, C_TEXT, "#%06lX", (unsigned long)(curColor >> 8));
+	if (curSwatch >= 0)
+		gfx_text(112, cy + 5, 0.42f, C_DIM, "swatch %d", curSwatch + 1);
+	else
+		gfx_text(112, cy + 5, 0.42f, C_DIM, "R+tap swatch: save");
 
 	// info
 	float iy = cy + 26;
-	gfx_text(10, iy, 0.42f, C_DIM, "Canvas %dx%d  Zoom %dx  Grid %s", doc.w, doc.h, zoom(), gridOn ? "on" : "off");
+	gfx_text(10, iy, 0.42f, C_DIM, "Canvas %dx%d  Zoom %s  Grid %s", doc.w, doc.h, zoom_label(), gridOn ? "on" : "off");
 	gfx_text(10, iy + 12, 0.42f, C_DIM, "Frame %d/%d  Mirror %s", doc.curFrame + 1, doc.frameCount, MIRROR_NAMES[mirrorMode]);
 
 	// true-size preview
@@ -1367,6 +1405,7 @@ int main(int argc, char* argv[])
 	view_fit();
 	after_doc_change();
 	export_recommended();
+	curColor = doc.swatches[0];
 
 	while (running && aptMainLoop())
 	{
@@ -1386,25 +1425,23 @@ int main(int argc, char* argv[])
 				{
 					uint32_t cols[DOC_PALETTE_SIZE];
 					int n = picker_list(cols);
-					if (memcmp(cols, doc.palette, n * sizeof(uint32_t)) != 0)
-					{
-						hist_begin(&doc);
-						hist_commit();
-						memcpy(doc.palette, cols, n * sizeof(uint32_t));
-						doc.dirty = true;
-						after_doc_change();
-					}
+					memcpy(doc.swatches, cols, n * sizeof(uint32_t));
+					if (curSwatch >= 0 && curSwatch < n)
+						curColor = doc.swatches[curSwatch];
+					doc.dirty = true;
 					char msg[64];
-					snprintf(msg, sizeof(msg), "Set %d palette color%s", n, n == 1 ? "" : "s");
+					snprintf(msg, sizeof(msg), "Set %d swatch%s", n, n == 1 ? "" : "es");
 					set_status(msg);
 				}
-				else if (r == PICK_OK && picker_color() != doc.palette[color])
+				else if (r == PICK_OK)
 				{
-					hist_begin(&doc);
-					hist_commit();
-					doc.palette[color] = picker_color();
-					doc.dirty = true;
-					after_doc_change();
+					// the swatch and the current color change; the drawing does not
+					curColor = picker_color();
+					if (curSwatch >= 0 && doc.swatches[curSwatch] != curColor)
+					{
+						doc.swatches[curSwatch] = curColor;
+						doc.dirty = true;
+					}
 				}
 				mode = MODE_DRAW;
 				touchTarget = (kHeld & KEY_TOUCH) ? TOUCH_STRIP : TOUCH_NONE; // don't draw with the closing tap
