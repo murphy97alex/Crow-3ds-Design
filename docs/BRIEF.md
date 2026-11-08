@@ -67,11 +67,22 @@ Stylus in right hand, frequent actions on left.
 - **M2 (done, v0.2.0):** brush sizes 1–9 with Square/Round/Dither shapes (pencil, eraser); pixel-perfect pencil
   (size 1); fill (contiguous or replace color); line, rectangle, ellipse (outline/filled, ZR snap,
   2:1 iso lines); mirror drawing (off / left-right / top-bottom / both); A tool options panel.
-- **M3 (v0.3.0):** select + move, copy/paste, flip/rotate 90°; stamps; outline (1px around selection/art);
+- **M3 (done, v0.3.0–0.3.2):** select + move, copy/paste, flip/rotate 90°; stamps; outline (1px around selection/art);
   shift/wrap canvas; PNG export: one checklist of sizes (1x–8x and 16–256 px) with a
-  "Recommended" preset (1x/2x/4x/8x).
-- **Later in v1:** HUD layout grid (every 8/16 px) and 3x3 tile preview; shading tool (step
-  lighter/darker along a palette ramp); autosave/recovery; text tool; camera mode; left-handed mode.
+  "Recommended" preset (1x/2x/4x/8x). Follow-ups from testing: swatches don't recolor (optional
+  linked swatches), zoom to 1/4x, Mirror for all tools, stamps drag-to-size, CC0 default palette,
+  palette text, square + hue bar picker.
+- **Proposed order from here (Alex picks each milestone):**
+  - **Canvas & import:** resize/crop canvas (anchor, crop to selection); import PNG from SD
+    (as project, stamp, or palette); magic wand (select by color); lasso selection.
+  - **Color tools:** color ramp between two swatches; adjust colors (hue/saturation/brightness,
+    invert); gradient dither fill; recent colors row; shading tool.
+  - **View & guides:** flip view (mirrored preview); HUD layout grid (8/16 px); isometric 2:1 grid;
+    3x3 tile preview; autosave/recovery.
+  - **Layers:** add/delete/reorder, hide/lock, opacity-free (pixel art), merge; .pxd layer chunks.
+    Do before the animator.
+  - **Camera mode** (filters → pixel art), **text tool**, **left-handed mode**.
+  - **v2 animator** after layers.
 
 ## Open questions
 - `.pxd` details (compression, where saves live on SD) — Claude decides, documents in docs/
