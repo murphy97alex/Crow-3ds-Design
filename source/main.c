@@ -46,20 +46,21 @@
 
 // ---- tools -----------------------------------------------------------------
 
-typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
-static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Eyedropper" };
+typedef enum { TOOL_PENCIL, TOOL_MIRROR, TOOL_ERASER, TOOL_FILL, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_EYEDROPPER, TOOL_COUNT } Tool;
+static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Mirror", "Eraser", "Fill", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Eyedropper" };
 
 static bool is_shape(Tool t) { return t == TOOL_LINE || t == TOOL_RECT || t == TOOL_ELLIPSE; }
 
 // per-tool options
 static Brush brushes[TOOL_COUNT] = {
-	[TOOL_PENCIL] = { 1, BRUSH_SQUARE, false }, [TOOL_ERASER] = { 3, BRUSH_SQUARE, false },
+	[TOOL_PENCIL] = { 1, BRUSH_SQUARE, false }, [TOOL_MIRROR] = { 1, BRUSH_SQUARE, false },
+	[TOOL_ERASER] = { 3, BRUSH_SQUARE, false },
 	[TOOL_LINE] = { 1, BRUSH_SQUARE, false },   [TOOL_RECT] = { 1, BRUSH_SQUARE, false },
 	[TOOL_ELLIPSE] = { 1, BRUSH_SQUARE, false },
 };
 static bool shapeFilled[TOOL_COUNT];
 static bool fillReplace;
-static Mirror mirrorMode = MIRROR_OFF;
+static Mirror mirrorMode = MIRROR_X;   // axis for the Mirror tool
 
 static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
 static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bottom", "Both" };
@@ -247,6 +248,8 @@ static int opt_rows(Tool t, OptKind* rows)
 	{
 	case TOOL_PENCIL:
 		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
+	case TOOL_MIRROR:
+		rows[n++] = OPT_MIRROR; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
 	case TOOL_ERASER:
 		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
 	case TOOL_FILL:
@@ -270,8 +273,6 @@ static int opt_rows(Tool t, OptKind* rows)
 	default:
 		break;
 	}
-	if (t != TOOL_EYEDROPPER)
-		rows[n++] = OPT_MIRROR;
 	return n;
 }
 
@@ -284,7 +285,7 @@ static const char* opt_label(OptKind k)
 	case OPT_PIXPERF: return "Pixel-perfect";
 	case OPT_STYLE: return "Style";
 	case OPT_FILLMODE: return "Mode";
-	case OPT_MIRROR: return "Mirror";
+	case OPT_MIRROR: return "Axis";
 	case OPT_STAMP: return "Stamp";
 	case OPT_SELALL: return "Select all";
 	case OPT_DESELECT: return "Deselect";
@@ -339,7 +340,9 @@ static void opt_change(OptKind k, int dir)
 	case OPT_PIXPERF: b->pixelPerfect = !b->pixelPerfect; break;
 	case OPT_STYLE: shapeFilled[tool] = !shapeFilled[tool]; break;
 	case OPT_FILLMODE: fillReplace = !fillReplace; break;
-	case OPT_MIRROR: mirrorMode = (mirrorMode + MIRROR_COUNT + dir) % MIRROR_COUNT; break;
+	case OPT_MIRROR: // Left-right, Top-bottom, Both (no "Off": that's the Pencil)
+		mirrorMode = (Mirror)((mirrorMode - 1 + 3 + dir) % 3 + 1);
+		break;
 	case OPT_STAMP: if (stampCount) stampSel = (stampSel + stampCount + dir) % stampCount; break;
 	default: break;
 	}
@@ -429,6 +432,8 @@ static void tool_summary(Tool t, char* out, size_t n)
 	{
 	case TOOL_PENCIL:
 		snprintf(out, n, "%d %s%s", b->size, SHAPE_NAMES[b->shape], b->pixelPerfect && b->size == 1 ? " PP" : ""); break;
+	case TOOL_MIRROR:
+		snprintf(out, n, "%s %d %s", MIRROR_NAMES[mirrorMode], b->size, SHAPE_NAMES[b->shape]); break;
 	case TOOL_ERASER:
 	case TOOL_LINE:
 		snprintf(out, n, "%d %s", b->size, SHAPE_NAMES[b->shape]); break;
@@ -1008,11 +1013,11 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				strokeValue = doc_color_index(&doc, curColor, true);
 				value = tool == TOOL_ERASER ? PIX_TRANSPARENT : strokeValue;
 				hist_begin(&doc);
-				tools_begin(&doc, mirrorMode);
+				tools_begin(&doc, tool == TOOL_MIRROR ? mirrorMode : MIRROR_OFF);
 				strokeActive = true;
 				if (tool == TOOL_FILL)
 					tools_fill(cx, cy, strokeValue, fillReplace);
-				else if (tool == TOOL_PENCIL || tool == TOOL_ERASER)
+				else if (tool == TOOL_PENCIL || tool == TOOL_MIRROR || tool == TOOL_ERASER)
 					tools_stroke_start(cx, cy, value, &brushes[tool]);
 				// shapes are drawn below while dragging
 			}
@@ -1025,7 +1030,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		screen_to_canvas(touch.px, touch.py, &cx, &cy);
 		if (dropper && !strokeActive)
 			eyedrop(cx, cy);
-		else if (strokeActive && (tool == TOOL_PENCIL || tool == TOOL_ERASER) && !(kDown & KEY_TOUCH))
+		else if (strokeActive && (tool == TOOL_PENCIL || tool == TOOL_MIRROR || tool == TOOL_ERASER) && !(kDown & KEY_TOUCH))
 			tools_stroke_to(cx, cy, value, &brushes[tool]);
 		else if (strokeActive && is_shape(tool))
 		{
@@ -1127,7 +1132,7 @@ static void draw_bottom(void)
 	}
 
 	// mirror guides
-	if (mirrorMode != MIRROR_OFF)
+	if (tool == TOOL_MIRROR)
 	{
 		u32 mc = C2D_Color32(0xFF, 0x50, 0xC8, 0xB0);
 		if (mirrorMode == MIRROR_X || mirrorMode == MIRROR_XY)
@@ -1209,18 +1214,18 @@ static void draw_top_tools(void)
 	gfx_text(10, 26, 0.42f, C_DIM, "TOOLS  D-pad < >   A: options");
 	for (int i = 0; i < TOOL_COUNT; i++)
 	{
-		float y = 40 + i * 13;
+		float y = 40 + i * 12;
 		if (i == tool)
-			C2D_DrawRectSolid(8, y - 1, 0.5f, 180, 13, C_SEL);
-		gfx_text(14, y - 1, 0.45f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
+			C2D_DrawRectSolid(8, y - 1, 0.5f, 180, 12, C_SEL);
+		gfx_text(14, y - 1, 0.42f, i == tool ? C_ACCENT : C_TEXT, "%s", TOOL_NAMES[i]);
 		char sum[32];
 		tool_summary(i, sum, sizeof(sum));
 		if (sum[0])
-			gfx_text(96, y, 0.4f, C_DIM, "%s", sum);
+			gfx_text(90, y - 1, 0.38f, C_DIM, "%s", sum);
 	}
 
 	// color
-	float cy = 40 + TOOL_COUNT * 13 + 5;
+	float cy = 40 + TOOL_COUNT * 12 + 5;
 	C2D_DrawRectSolid(10, cy, 0.5f, 22, 22, C_TEXT);
 	C2D_DrawRectSolid(11, cy + 1, 0.5f, 20, 20, rgba_to_c2d(curColor));
 	gfx_text(40, cy + 4, 0.5f, C_TEXT, "#%06lX", (unsigned long)(curColor >> 8));
@@ -1232,7 +1237,7 @@ static void draw_top_tools(void)
 	// info
 	float iy = cy + 26;
 	gfx_text(10, iy, 0.42f, C_DIM, "Canvas %dx%d  Zoom %s  Grid %s", doc.w, doc.h, zoom_label(), gridOn ? "on" : "off");
-	gfx_text(10, iy + 12, 0.42f, C_DIM, "Frame %d/%d  Mirror %s", doc.curFrame + 1, doc.frameCount, MIRROR_NAMES[mirrorMode]);
+	gfx_text(10, iy + 12, 0.42f, C_DIM, "Frame %d/%d  Colors %d", doc.curFrame + 1, doc.frameCount, doc.colorCount);
 
 	// true-size preview
 	C2D_DrawRectSolid(196, 28, 0.5f, 198, 180, C_BG_BOT);
