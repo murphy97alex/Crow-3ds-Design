@@ -61,13 +61,15 @@ static Brush brushes[TOOL_COUNT] = {
 static bool shapeFilled[TOOL_COUNT];
 static bool fillReplace;
 static Mirror mirrorMode = MIRROR_X;   // axis for the Mirror tool
+static bool mirrorOn = true;
+static bool stampDragSize;             // Stamp: false = original size, true = drag to size
 
 static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
 static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bottom", "Both" };
 
 // options panel rows
 typedef enum {
-	OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR, OPT_STAMP,
+	OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR, OPT_MIRRORON, OPT_STAMP, OPT_STAMPSIZE,
 	// actions (A runs them)
 	OPT_ACT_FIRST, OPT_SELALL = OPT_ACT_FIRST, OPT_DESELECT, OPT_COPY, OPT_CUT, OPT_PASTE, OPT_DELETE,
 	OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_SAVESTAMP,
@@ -77,6 +79,8 @@ typedef enum {
 // stamps
 static char stampNames[STAMP_MAX][DOC_NAME_MAX];
 static int stampCount, stampSel;
+static uint8_t* stampPx;               // stamp being placed (original pixels)
+static int stampW, stampH;
 static int optSel;
 
 // ---- app state ---------------------------------------------------------------
@@ -105,7 +109,8 @@ enum { TOUCH_NONE, TOUCH_CANVAS, TOUCH_STRIP };
 static int touchTarget = TOUCH_NONE;
 static int startCX, startCY;   // where the current stroke/shape began
 static bool strokeActive;
-enum { SEL_IDLE, SEL_DRAWING, SEL_MOVING };
+enum { SEL_IDLE, SEL_DRAWING, SEL_MOVING, SEL_SIZING };
+static int selLastCX, selLastCY;  // last stylus position (the release frame reads 0,0)
 static int selDrag = SEL_IDLE;
 static int moveOffX, moveOffY;  // stylus offset inside the floating pixels
 static int shiftX, shiftY, shiftLastCX, shiftLastCY;
@@ -249,7 +254,7 @@ static int opt_rows(Tool t, OptKind* rows)
 	case TOOL_PENCIL:
 		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
 	case TOOL_MIRROR:
-		rows[n++] = OPT_MIRROR; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
+		rows[n++] = OPT_MIRRORON; rows[n++] = OPT_MIRROR; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
 	case TOOL_ERASER:
 		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
 	case TOOL_FILL:
@@ -268,7 +273,7 @@ static int opt_rows(Tool t, OptKind* rows)
 		return n;
 	}
 	case TOOL_STAMP:
-		rows[n++] = OPT_STAMP;
+		rows[n++] = OPT_STAMP; rows[n++] = OPT_STAMPSIZE;
 		return n;
 	default:
 		break;
@@ -286,6 +291,8 @@ static const char* opt_label(OptKind k)
 	case OPT_STYLE: return "Style";
 	case OPT_FILLMODE: return "Mode";
 	case OPT_MIRROR: return "Axis";
+	case OPT_MIRRORON: return "Mirror";
+	case OPT_STAMPSIZE: return "Size";
 	case OPT_STAMP: return "Stamp";
 	case OPT_SELALL: return "Select all";
 	case OPT_DESELECT: return "Deselect";
@@ -313,6 +320,8 @@ static void opt_value(OptKind k, char* out, size_t n)
 	case OPT_STYLE: snprintf(out, n, "%s", shapeFilled[tool] ? "Filled" : "Outline"); break;
 	case OPT_FILLMODE: snprintf(out, n, "%s", fillReplace ? "Replace color" : "Connected area"); break;
 	case OPT_MIRROR: snprintf(out, n, "%s", MIRROR_NAMES[mirrorMode]); break;
+	case OPT_MIRRORON: snprintf(out, n, "%s", mirrorOn ? "On" : "Off (plain pencil)"); break;
+	case OPT_STAMPSIZE: snprintf(out, n, "%s", stampDragSize ? "Drag to size" : "Original"); break;
 	case OPT_STAMP:
 		if (stampCount) snprintf(out, n, "%s  (%d/%d)", stampNames[stampSel], stampSel + 1, stampCount);
 		else snprintf(out, n, "none saved yet");
@@ -344,6 +353,8 @@ static void opt_change(OptKind k, int dir)
 		mirrorMode = (Mirror)((mirrorMode - 1 + 3 + dir) % 3 + 1);
 		break;
 	case OPT_STAMP: if (stampCount) stampSel = (stampSel + stampCount + dir) % stampCount; break;
+	case OPT_MIRRORON: mirrorOn = !mirrorOn; break;
+	case OPT_STAMPSIZE: stampDragSize = !stampDragSize; break;
 	default: break;
 	}
 }
@@ -433,7 +444,9 @@ static void tool_summary(Tool t, char* out, size_t n)
 	case TOOL_PENCIL:
 		snprintf(out, n, "%d %s%s", b->size, SHAPE_NAMES[b->shape], b->pixelPerfect && b->size == 1 ? " PP" : ""); break;
 	case TOOL_MIRROR:
-		snprintf(out, n, "%s %d %s", MIRROR_NAMES[mirrorMode], b->size, SHAPE_NAMES[b->shape]); break;
+		if (mirrorOn) snprintf(out, n, "%s %d %s", MIRROR_NAMES[mirrorMode], b->size, SHAPE_NAMES[b->shape]);
+		else snprintf(out, n, "Off %d %s", b->size, SHAPE_NAMES[b->shape]);
+		break;
 	case TOOL_ERASER:
 	case TOOL_LINE:
 		snprintf(out, n, "%d %s", b->size, SHAPE_NAMES[b->shape]); break;
@@ -447,7 +460,7 @@ static void tool_summary(Tool t, char* out, size_t n)
 		if (sel_active()) { Rect r = sel_rect(); snprintf(out, n, "%dx%d%s", r.w, r.h, sel_floating() ? " moving" : ""); }
 		else out[0] = 0;
 		break;
-	case TOOL_STAMP: snprintf(out, n, "%s", stampCount ? stampNames[stampSel] : "none"); break;
+	case TOOL_STAMP: snprintf(out, n, "%s%s", stampCount ? stampNames[stampSel] : "none", stampDragSize ? " (drag)" : ""); break;
 	default: out[0] = 0; break;
 	}
 }
@@ -918,17 +931,17 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			startCY = cy;
 			if (tool == TOOL_STAMP)
 			{
-				uint8_t* px;
-				int w, h;
+				free(stampPx);
+				stampPx = NULL;
 				if (!stampCount) { set_status("No stamps yet - save one with Select, A"); selDrag = SEL_IDLE; }
-				else if (stamp_load(STAMP_DIR, stampNames[stampSel], &doc, &px, &w, &h)) { set_status("Couldn't load stamp"); selDrag = SEL_IDLE; }
+				else if (stamp_load(STAMP_DIR, stampNames[stampSel], &doc, &stampPx, &stampW, &stampH)) { set_status("Couldn't load stamp"); selDrag = SEL_IDLE; }
 				else
 				{
-					moveOffX = w / 2;
-					moveOffY = h / 2;
-					sel_float_pixels(&doc, px, w, h, cx - moveOffX, cy - moveOffY);
-					free(px);
-					selDrag = SEL_MOVING;
+					// a tap places it at original size, centered on the stylus
+					moveOffX = stampW / 2;
+					moveOffY = stampH / 2;
+					sel_float_pixels(&doc, stampPx, stampW, stampH, cx - moveOffX, cy - moveOffY);
+					selDrag = stampDragSize ? SEL_SIZING : SEL_MOVING;
 				}
 			}
 			else if (sel_contains(cx, cy))
@@ -949,16 +962,49 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			sel_set(&doc, startCX, startCY, cx, cy);
 		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_MOVING)
 			sel_move_to(&doc, cx - moveOffX, cy - moveOffY);
+		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_SIZING && (cx != startCX || cy != startCY))
+		{
+			// stamp scaled into the box from the touch point to the stylus (ZR keeps proportions)
+			int w = abs(cx - startCX) + 1, h = abs(cy - startCY) + 1;
+			if (kHeld & KEY_ZR)
+			{
+				float s = fmaxf((float)w / stampW, (float)h / stampH);
+				w = (int)lroundf(stampW * s);
+				h = (int)lroundf(stampH * s);
+				if (w < 1) w = 1;
+				if (h < 1) h = 1;
+			}
+			if (w > DOC_MAX_W * 2) w = DOC_MAX_W * 2;
+			if (h > DOC_MAX_H * 2) h = DOC_MAX_H * 2;
+			uint8_t* scaled = malloc((size_t)w * h);
+			if (scaled)
+			{
+				for (int j = 0; j < h; j++)
+					for (int i = 0; i < w; i++)
+						scaled[j * w + i] = stampPx[(j * stampH / h) * stampW + i * stampW / w];
+				int x = cx >= startCX ? startCX : startCX - w + 1;
+				int y = cy >= startCY ? startCY : startCY - h + 1;
+				sel_float_replace(&doc, scaled, w, h, x, y);
+				free(scaled);
+			}
+		}
+		if (kHeld & KEY_TOUCH)
+		{
+			selLastCX = cx;
+			selLastCY = cy;
+		}
 
 		if (!(kHeld & KEY_TOUCH))
 		{
-			if (selDrag == SEL_DRAWING && startCX == cx && startCY == cy)
+			if (selDrag == SEL_DRAWING && startCX == selLastCX && startCY == selLastCY)
 				sel_clear(&doc);                 // a tap outside deselects
-			if (tool == TOOL_STAMP && selDrag == SEL_MOVING)
+			if (tool == TOOL_STAMP && (selDrag == SEL_MOVING || selDrag == SEL_SIZING))
 			{
 				sel_commit(&doc);                // place the stamp
 				sel_clear(&doc);
 			}
+			free(stampPx);
+			stampPx = NULL;
 			selDrag = SEL_IDLE;
 			touchTarget = TOUCH_NONE;
 		}
@@ -1013,7 +1059,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				strokeValue = doc_color_index(&doc, curColor, true);
 				value = tool == TOOL_ERASER ? PIX_TRANSPARENT : strokeValue;
 				hist_begin(&doc);
-				tools_begin(&doc, tool == TOOL_MIRROR ? mirrorMode : MIRROR_OFF);
+				tools_begin(&doc, tool == TOOL_MIRROR && mirrorOn ? mirrorMode : MIRROR_OFF);
 				strokeActive = true;
 				if (tool == TOOL_FILL)
 					tools_fill(cx, cy, strokeValue, fillReplace);
@@ -1132,7 +1178,7 @@ static void draw_bottom(void)
 	}
 
 	// mirror guides
-	if (tool == TOOL_MIRROR)
+	if (tool == TOOL_MIRROR && mirrorOn)
 	{
 		u32 mc = C2D_Color32(0xFF, 0x50, 0xC8, 0xB0);
 		if (mirrorMode == MIRROR_X || mirrorMode == MIRROR_XY)
@@ -1251,7 +1297,8 @@ static void draw_top_tools(void)
 	else if (tool == TOOL_SELECT)
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag: select / move.  A: actions  B: deselect");
 	else if (tool == TOOL_STAMP)
-		gfx_text(10, 222, 0.42f, C_DIM, "Touch to place, drag to position.  A: pick stamp");
+		gfx_text(10, 222, 0.42f, C_DIM, stampDragSize ? "Drag a box to size it (ZR: keep shape).  A: options"
+		                                               : "Touch to place, drag to position.  A: options");
 	else if (is_shape(tool))
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag to draw. Hold ZR to snap, B cancels.");
 	else

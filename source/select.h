@@ -22,6 +22,8 @@ void sel_move_to(Doc* d, int x, int y);
 void sel_commit(Doc* d);             // drop floating pixels (one undo step); keeps selection rect
 void sel_cancel(Doc* d);             // undo the lift/paste entirely
 void sel_float_pixels(Doc* d, const uint8_t* px, int w, int h, int x, int y);
+// Replace the floating pixels (e.g. a stamp being resized) without a new undo step.
+void sel_float_replace(Doc* d, const uint8_t* px, int w, int h, int x, int y);
 
 // Actions (apply to the floating layer, or lift+apply+commit for a plain selection)
 void sel_copy(Doc* d);

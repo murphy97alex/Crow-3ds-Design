@@ -117,6 +117,18 @@ void sel_float_pixels(Doc* d, const uint8_t* src, int w, int h, int x, int y)
 	render(d);
 }
 
+void sel_float_replace(Doc* d, const uint8_t* src, int w, int h, int x, int y)
+{
+	if (!floating) { sel_float_pixels(d, src, w, h, x, y); return; }
+	uint8_t* p = malloc((size_t)w * h);
+	if (!p) return;
+	memcpy(p, src, (size_t)w * h);
+	free(flt);
+	flt = p;
+	sel = (Rect){ x, y, w, h };
+	render(d);
+}
+
 void sel_move_to(Doc* d, int x, int y)
 {
 	if (!floating) return;

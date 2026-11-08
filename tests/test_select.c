@@ -67,6 +67,17 @@ int main(void)
 	for (int y = 2; y <= 6; y++) assert(at(4, y) == 1);
 	assert(count(1) == 5);
 
+	// replacing floating pixels (stamp resize) keeps one undo step
+	doc_new(&d, 6, 6); sel_reset();
+	{
+		uint8_t a[1] = { 3 }, b[4] = { 4, 4, 4, 4 };
+		sel_float_pixels(&d, a, 1, 1, 0, 0);
+		sel_float_replace(&d, b, 2, 2, 1, 1);
+		assert(at(0, 0) == 0 && at(1, 1) == 4 && at(2, 2) == 4 && count(4) == 4);
+		sel_commit(&d);
+		assert(hist_undo(&d) && count(4) == 0 && !hist_undo(&d));
+	}
+
 	// shift with wrap
 	doc_new(&d, 4, 3); sel_reset();
 	doc_pixels(&d)[0] = 1;
