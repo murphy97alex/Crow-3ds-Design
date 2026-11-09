@@ -56,7 +56,8 @@
 typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_SHADE, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_TEXT, TOOL_EYEDROPPER, TOOL_MIRROR, TOOL_COUNT } Tool;
 static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Shade", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Text", "Eyedropper", "Mirror" };
 
-static bool is_shape(Tool t) { return t == TOOL_LINE || t == TOOL_RECT || t == TOOL_ELLIPSE; }
+static bool eraserLine;
+static bool is_shape(Tool t) { return t == TOOL_LINE || t == TOOL_RECT || t == TOOL_ELLIPSE || (t == TOOL_ERASER && eraserLine); }
 
 // per-tool options
 static Brush brushes[TOOL_COUNT] = {
@@ -77,34 +78,42 @@ static bool wandAll;                   // magic wand: all pixels of the color, n
 static const char* SELMODE_NAMES[SELMODE_COUNT] = { "Rectangle", "Magic wand", "Lasso" };
 static Mirror mirrorMode = MIRROR_X;   // axis for the Mirror tool
 static bool mirrorOn = false;          // applies to every drawing tool
-static bool stampDragSize;             // Stamp: false = original size, true = drag to size
+static int mirrorAX2, mirrorAY2;       // axis position x2 (between pixels allowed); 0 = centre
+// eraserLine (declared above): Eraser draws straight lines instead of freehand
+static bool tfCrisp = false, textCrisp = true;   // transform snaps to whole sizes
+static SelOp selOp = SELOP_NEW;
+static int wandTol = 0;                // magic wand tolerance %
+static bool wandSampleAll = true;      // wand compares the colors you see
 // Text tool
 static int textFont = 4, textScale = 1, textSpacing = 0, textOutline = -1;  // outline: swatch index or -1
 static char textStr[TEXT_MAX];
 static bool textOn;                    // floating text waiting to be placed
-static bool textMoved;
-static bool textSizing;                // dragging the resize handle
 #define TEXT_MAX_SCALE 32
-#define HANDLE 14                      // resize handle size on screen (pixels)
+// transform handles
+enum { TF_NONE, TF_MOVE, TF_CORNER, TF_EDGE, TF_ROTATE };
+static int tfDrag, tfHandle;
+static float tfFixX, tfFixY;           // the point that stays put while resizing (canvas coords)
+static float tfMoveOffX, tfMoveOffY;
+static bool tfMoved;
 
 static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
 static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bottom", "Both" };
 
 // options panel rows
 typedef enum {
-	OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR, OPT_MIRRORON, OPT_STAMP, OPT_STAMPSIZE,
+	OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR, OPT_MIRRORON, OPT_STAMP, OPT_CRISP,
+	OPT_SELOP, OPT_TOLERANCE, OPT_SAMPLE, OPT_ERASEMODE, OPT_AXISPOS,
 	OPT_SHADEDIR, OPT_SELMODE, OPT_WANDALL, OPT_FONT, OPT_TSCALE, OPT_TSPACING, OPT_TOUTLINE,
 	// actions (A runs them)
 	OPT_ACT_FIRST, OPT_SELALL = OPT_ACT_FIRST, OPT_DESELECT, OPT_COPY, OPT_CUT, OPT_PASTE, OPT_DELETE,
 	OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_SAVESTAMP, OPT_CROP, OPT_TEXTEDIT, OPT_TEXTPLACE,
+	OPT_INVERT, OPT_TRANSFORM, OPT_APPLY, OPT_AXISRESET,
 } OptKind;
-#define OPT_MAX_ROWS 16
+#define OPT_MAX_ROWS 24
 
 // stamps
 static char stampNames[STAMP_MAX][DOC_NAME_MAX];
 static int stampCount, stampSel;
-static uint8_t* stampPx;               // stamp being placed (original pixels)
-static int stampW, stampH;
 static int optSel;
 static Tool optTool;   // tool whose options panel is open
 static int listPos;    // D-pad cursor in the tool list (Mirror is a settings entry, not a tool)
@@ -136,11 +145,12 @@ static const float ZOOMS[] = { 0.25f, 0.5f, 1, 2, 3, 4, 6, 8, 12, 16, 24 };
 #define ZOOM_COUNT (int)(sizeof(ZOOMS) / sizeof(ZOOMS[0]))
 
 // touch / stroke
-enum { TOUCH_NONE, TOUCH_CANVAS, TOUCH_STRIP };
+enum { TOUCH_NONE, TOUCH_CANVAS, TOUCH_STRIP, TOUCH_PAN };
+static int panLastX, panLastY;
 static int touchTarget = TOUCH_NONE;
 static int startCX, startCY;   // where the current stroke/shape began
 static bool strokeActive;
-enum { SEL_IDLE, SEL_DRAWING, SEL_MOVING, SEL_SIZING, SEL_LASSO };
+enum { SEL_IDLE, SEL_DRAWING, SEL_PENDING, SEL_LASSO };
 #define LASSO_MAX 1024
 static int lassoPts[LASSO_MAX * 2], lassoCount;
 static uint8_t shadeMap[256];
@@ -148,7 +158,6 @@ static uint32_t recent[RECENT_COUNT];
 static int recentCount;
 static int selLastCX, selLastCY;  // last stylus position (the release frame reads 0,0)
 static int selDrag = SEL_IDLE;
-static int moveOffX, moveOffY;  // stylus offset inside the floating pixels
 static int shiftX, shiftY, shiftLastCX, shiftLastCY;
 
 // menus
@@ -293,36 +302,22 @@ static bool ask_multiline(const char* hint, char* buf, size_t n)
 	return buf[0] != 0;
 }
 
-// Biggest scale that keeps the text within 2x the largest canvas (keeps things responsive).
-static int text_scale_cap(void)
-{
-	int w, h;
-	uint8_t* p = text_render(&FONTS[textFont], textStr, 1, textSpacing, 1, 0, &w, &h);
-	if (!p) return TEXT_MAX_SCALE;
-	free(p);
-	int cap = TEXT_MAX_SCALE;
-	while (cap > 1 && (w * cap > 2 * DOC_MAX_W || h * cap > 2 * DOC_MAX_H)) cap--;
-	return cap;
-}
-
+// Text renders at 1x; its size comes from the transform (handles or the Size option).
 static uint8_t* render_text(bool allowCompact, int* w, int* h)
 {
-	int cap = text_scale_cap();
-	if (textScale > cap) textScale = cap;
 	uint8_t fg = doc_color_index(&doc, curColor, allowCompact);
 	uint8_t ol = textOutline >= 0 ? doc_color_index(&doc, doc.swatches[textOutline], false) : 0;
-	return text_render(&FONTS[textFont], textStr, textScale, textSpacing, fg, ol, w, h);
+	return text_render(&FONTS[textFont], textStr, 1, textSpacing, fg, ol, w, h);
 }
 
-// Re-render floating text after its options or color changed (keeps its position).
+// Re-render floating text after its options, color or wording changed (keeps size/rotation).
 static void text_refresh(void)
 {
 	if (!textOn || !sel_floating()) return;
 	int w, h;
 	uint8_t* px = render_text(false, &w, &h);
 	if (!px) return;
-	Rect r = sel_rect();
-	sel_float_replace(&doc, px, w, h, r.x, r.y);
+	sel_set_source(&doc, px, w, h);
 	free(px);
 	after_doc_change();
 }
@@ -349,9 +344,12 @@ static void text_start(int x, int y)
 	if (!px) return;
 	sel_float_pixels(&doc, px, w, h, x, y);
 	sel_set_float_mirror(mirrorOn ? mirrorMode : MIRROR_OFF);
+	sel_set_mirror_axis(mirrorAX2, mirrorAY2);
 	free(px);
+	if (textScale > 1)
+		sel_transform(&doc, x, y, w * textScale, h * textScale, 0, false);
 	textOn = true;
-	set_status("Drag to move, tap it to edit, B or tap outside to place");
+	set_status("Drag to move, handles to size/rotate, tap to edit, B to place");
 	after_doc_change();
 }
 
@@ -361,16 +359,149 @@ static void text_edit(void)
 		text_refresh();
 }
 
+// Set the floating text's size to a whole multiple (Size option), keeping its top-left.
+static void text_apply_scale(void)
+{
+	if (!textOn || !sel_floating()) return;
+	float x, y, w, h, a;
+	int sw, sh;
+	sel_transform_get(&x, &y, &w, &h, &a);
+	sel_source_size(&sw, &sh);
+	sel_transform(&doc, x, y, sw * textScale, sh * textScale, a, a != 0);
+	after_doc_change();
+}
+
 static float canvas_sx(void);
 static float canvas_sy(void);
 
-// Screen rectangle of the floating text's resize handle (bottom-right corner).
-static void text_handle(float* hx, float* hy)
+// ---- transform handles -----------------------------------------------------------------
+// Handles 0-3: corners TL TR BR BL (resize, proportional unless ZR). 4-7: edges T R B L
+// (stretch one way). 8: rotate (dot above the top edge). Positions are unrotated offsets from
+// the box centre in half-sizes.
+static const float HX[9] = { -1, 1, 1, -1, 0, 1, 0, -1, 0 };
+static const float HY[9] = { -1, -1, 1, 1, -1, 0, 1, 0, -1 };
+
+static void tf_world(int k, float* wx, float* wy)
 {
-	Rect r = sel_rect();
-	float z = ZOOMS[zoomIdx];
-	*hx = canvas_sx() + (r.x + r.w) * z - HANDLE / 2;
-	*hy = canvas_sy() + (r.y + r.h) * z - HANDLE / 2;
+	float x, y, w, h, a;
+	sel_transform_get(&x, &y, &w, &h, &a);
+	float lx = HX[k] * w / 2, ly = HY[k] * h / 2;
+	if (k == 8) ly -= 18 / ZOOMS[zoomIdx];
+	float r = a * (float)M_PI / 180, ca = cosf(r), sa = sinf(r);
+	*wx = x + w / 2 + lx * ca - ly * sa;
+	*wy = y + h / 2 + lx * sa + ly * ca;
+}
+
+static void tf_screen(int k, float* sx, float* sy)
+{
+	float wx, wy;
+	tf_world(k, &wx, &wy);
+	*sx = canvas_sx() + wx * ZOOMS[zoomIdx];
+	*sy = canvas_sy() + wy * ZOOMS[zoomIdx];
+}
+
+static int tf_hit(int px, int py)
+{
+	static const int order[9] = { 8, 0, 1, 2, 3, 4, 5, 6, 7 };   // rotate dot first, then corners
+	for (int i = 0; i < 9; i++)
+	{
+		float hx, hy;
+		tf_screen(order[i], &hx, &hy);
+		if (fabsf(px - hx) <= 11 && fabsf(py - hy) <= 11) return order[i];
+	}
+	return -1;
+}
+
+// Is a canvas point inside the (possibly rotated) transform box?
+static bool tf_inside(float fx, float fy)
+{
+	float x, y, w, h, a;
+	sel_transform_get(&x, &y, &w, &h, &a);
+	float r = a * (float)M_PI / 180, ca = cosf(r), sa = sinf(r);
+	float dx = fx - (x + w / 2), dy = fy - (y + h / 2);
+	float lx = dx * ca + dy * sa, ly = -dx * sa + dy * ca;
+	return fabsf(lx) <= w / 2 + 0.5f && fabsf(ly) <= h / 2 + 0.5f;
+}
+
+static void tf_begin(int k)
+{
+	tfHandle = k;
+	tfDrag = k < 4 ? TF_CORNER : k < 8 ? TF_EDGE : TF_ROTATE;
+	if (k < 4) tf_world((k + 2) % 4, &tfFixX, &tfFixY);           // opposite corner stays put
+	else if (k < 8) tf_world(4 + (k - 4 + 2) % 4, &tfFixX, &tfFixY); // opposite edge stays put
+}
+
+static float crisp_scale(float s)
+{
+	if (s >= 1) return fmaxf(1, roundf(s));
+	return 1.0f / fmaxf(1, roundf(1 / s));
+}
+
+static void tf_drag(float fx, float fy, bool zr, bool crisp)
+{
+	float x, y, w, h, a;
+	int sw, sh;
+	sel_transform_get(&x, &y, &w, &h, &a);
+	sel_source_size(&sw, &sh);
+	float r = a * (float)M_PI / 180, ca = cosf(r), sa = sinf(r);
+	if (tfDrag == TF_ROTATE)
+	{
+		float cx = x + w / 2, cy = y + h / 2;
+		float ang = atan2f(fx - cx, -(fy - cy)) * 180 / (float)M_PI;   // 0 = handle straight up
+		if (zr) ang = roundf(ang / 15) * 15;                             // ZR: 15-degree steps
+		sel_transform(&doc, x, y, w, h, ang, false);
+		return;
+	}
+	// stylus relative to the fixed point, in the box's own (unrotated) axes
+	float dx = fx - tfFixX, dy = fy - tfFixY;
+	float vx = dx * ca + dy * sa, vy = -dx * sa + dy * ca;
+	float dirx = HX[tfHandle], diry = HY[tfHandle];
+	float nw = w, nh = h;
+	if (tfDrag == TF_CORNER)
+	{
+		nw = fmaxf(1, vx * dirx);
+		nh = fmaxf(1, vy * diry);
+		if (!zr)
+		{
+			// proportional (no warping): one scale for both directions
+			float s = fmaxf(nw / sw, nh / sh);
+			if (crisp) s = crisp_scale(s);
+			nw = sw * s;
+			nh = sh * s;
+		}
+		else if (crisp)
+		{
+			nw = sw * crisp_scale(nw / sw);
+			nh = sh * crisp_scale(nh / sh);
+		}
+	}
+	else if (dirx != 0)
+	{
+		nw = fmaxf(1, vx * dirx);
+		if (crisp) nw = sw * crisp_scale(nw / sw);
+	}
+	else
+	{
+		nh = fmaxf(1, vy * diry);
+		if (crisp) nh = sh * crisp_scale(nh / sh);
+	}
+	// new centre: from the fixed point, half the new size toward the dragged handle
+	float ox = dirx * nw / 2, oy = diry * nh / 2;
+	float ncx = tfFixX + ox * ca - oy * sa, ncy = tfFixY + ox * sa + oy * ca;
+	sel_transform(&doc, ncx - nw / 2, ncy - nh / 2, nw, nh, a, false);
+}
+
+static void tf_end(void)
+{
+	float x, y, w, h, a;
+	sel_transform_get(&x, &y, &w, &h, &a);
+	if (a != 0) sel_transform(&doc, x, y, w, h, a, true);   // smoother rotation once let go
+	if (tool == TOOL_TEXT)
+	{
+		int sw, sh;
+		sel_source_size(&sw, &sh);
+		textScale = (int)fmaxf(1, roundf(w / sw));
+	}
 }
 
 static void set_tool(Tool t)
@@ -468,9 +599,9 @@ static int opt_rows(Tool t, OptKind* rows)
 	case TOOL_PENCIL:
 		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; rows[n++] = OPT_PIXPERF; break;
 	case TOOL_MIRROR:
-		rows[n++] = OPT_MIRRORON; rows[n++] = OPT_MIRROR; break;
+		rows[n++] = OPT_MIRRORON; rows[n++] = OPT_MIRROR; rows[n++] = OPT_AXISPOS; rows[n++] = OPT_AXISRESET; break;
 	case TOOL_ERASER:
-		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
+		rows[n++] = OPT_ERASEMODE; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
 	case TOOL_FILL:
 		rows[n++] = OPT_FILLMODE; break;
 	case TOOL_SHADE:
@@ -483,19 +614,22 @@ static int opt_rows(Tool t, OptKind* rows)
 	case TOOL_SELECT:
 	{
 		rows[n++] = OPT_SELMODE;
-		if (selMode == SELMODE_WAND) rows[n++] = OPT_WANDALL;
-		static const OptKind acts[] = { OPT_SELALL, OPT_DESELECT, OPT_COPY, OPT_CUT, OPT_PASTE, OPT_DELETE,
-		                                OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_CROP, OPT_SAVESTAMP };
+		rows[n++] = OPT_SELOP;
+		if (selMode == SELMODE_WAND) { rows[n++] = OPT_WANDALL; rows[n++] = OPT_TOLERANCE; rows[n++] = OPT_SAMPLE; }
+		rows[n++] = OPT_CRISP;
+		static const OptKind acts[] = { OPT_TRANSFORM, OPT_APPLY, OPT_SELALL, OPT_DESELECT, OPT_INVERT, OPT_COPY, OPT_CUT,
+		                                OPT_PASTE, OPT_DELETE, OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_CROP,
+		                                OPT_SAVESTAMP };
 		for (size_t i = 0; i < sizeof(acts) / sizeof(acts[0]); i++)
 			rows[n++] = acts[i];
 		return n;
 	}
 	case TOOL_STAMP:
-		rows[n++] = OPT_STAMP; rows[n++] = OPT_STAMPSIZE;
+		rows[n++] = OPT_STAMP; rows[n++] = OPT_CRISP; rows[n++] = OPT_APPLY;
 		return n;
 	case TOOL_TEXT:
 		rows[n++] = OPT_FONT; rows[n++] = OPT_TSCALE; rows[n++] = OPT_TSPACING; rows[n++] = OPT_TOUTLINE;
-		rows[n++] = OPT_TEXTEDIT; rows[n++] = OPT_TEXTPLACE;
+		rows[n++] = OPT_CRISP; rows[n++] = OPT_TEXTEDIT; rows[n++] = OPT_TEXTPLACE;
 		return n;
 	default:
 		break;
@@ -514,7 +648,16 @@ static const char* opt_label(OptKind k)
 	case OPT_FILLMODE: return "Mode";
 	case OPT_MIRROR: return "Axis";
 	case OPT_MIRRORON: return "Mirror";
-	case OPT_STAMPSIZE: return "Size";
+	case OPT_CRISP: return "Crisp sizes";
+	case OPT_ERASEMODE: return "Mode";
+	case OPT_AXISPOS: return "Axis position";
+	case OPT_AXISRESET: return "Reset axis to center";
+	case OPT_SELOP: return "Combine";
+	case OPT_TOLERANCE: return "Tolerance";
+	case OPT_SAMPLE: return "Sample";
+	case OPT_INVERT: return "Invert selection";
+	case OPT_TRANSFORM: return "Transform (handles)";
+	case OPT_APPLY: return "Apply / place";
 	case OPT_STAMP: return "Stamp";
 	case OPT_SELALL: return "Select all";
 	case OPT_DESELECT: return "Deselect";
@@ -563,7 +706,17 @@ static void opt_value(OptKind k, char* out, size_t n)
 		break;
 	case OPT_MIRROR: snprintf(out, n, "%s", MIRROR_NAMES[mirrorMode]); break;
 	case OPT_MIRRORON: snprintf(out, n, "%s", mirrorOn ? "On" : "Off"); break;
-	case OPT_STAMPSIZE: snprintf(out, n, "%s", stampDragSize ? "Drag to size" : "Original"); break;
+	case OPT_CRISP:
+		snprintf(out, n, "%s", (optTool == TOOL_TEXT ? textCrisp : tfCrisp) ? "On (1x, 2x, 3x...)" : "Off (any size)");
+		break;
+	case OPT_SELOP: snprintf(out, n, "%s", selOp == SELOP_NEW ? "New selection" : selOp == SELOP_ADD ? "Add to selection" : "Subtract"); break;
+	case OPT_TOLERANCE: snprintf(out, n, "%d%%%s", wandTol, wandTol ? "" : " (exact color)"); break;
+	case OPT_SAMPLE: snprintf(out, n, "%s", wandSampleAll ? "All visible layers" : "Current layer"); break;
+	case OPT_ERASEMODE: snprintf(out, n, "%s", eraserLine ? "Line (drag)" : "Freehand"); break;
+	case OPT_AXISPOS:
+		if (!mirrorAX2 && !mirrorAY2) snprintf(out, n, "Center (touch canvas to move)");
+		else snprintf(out, n, "x %.1f  y %.1f", (mirrorAX2 ? mirrorAX2 : doc.w) / 2.0f, (mirrorAY2 ? mirrorAY2 : doc.h) / 2.0f);
+		break;
 	case OPT_STAMP:
 		if (stampCount) snprintf(out, n, "%s  (%d/%d)", stampNames[stampSel], stampSel + 1, stampCount);
 		else snprintf(out, n, "none saved yet");
@@ -595,7 +748,10 @@ static void opt_change(OptKind k, int dir)
 	case OPT_SELMODE: selMode = (selMode + SELMODE_COUNT + dir) % SELMODE_COUNT; break;
 	case OPT_WANDALL: wandAll = !wandAll; break;
 	case OPT_FONT: textFont = (textFont + FONT_COUNT + dir) % FONT_COUNT; break;
-	case OPT_TSCALE: textScale = textScale + dir < 1 ? 1 : textScale + dir > TEXT_MAX_SCALE ? TEXT_MAX_SCALE : textScale + dir; break;
+	case OPT_TSCALE:
+		textScale = textScale + dir < 1 ? 1 : textScale + dir > TEXT_MAX_SCALE ? TEXT_MAX_SCALE : textScale + dir;
+		text_apply_scale();
+		break;
 	case OPT_TSPACING: textSpacing = textSpacing + dir < -1 ? -1 : textSpacing + dir > 4 ? 4 : textSpacing + dir; break;
 	case OPT_TOUTLINE: textOutline = (textOutline + 1 + DOC_PALETTE_SIZE + 1 + dir) % (DOC_PALETTE_SIZE + 1) - 1; break;
 	case OPT_MIRROR: // Left-right, Top-bottom, Both ("Off" is the On/Off row)
@@ -603,7 +759,11 @@ static void opt_change(OptKind k, int dir)
 		break;
 	case OPT_STAMP: if (stampCount) stampSel = (stampSel + stampCount + dir) % stampCount; break;
 	case OPT_MIRRORON: mirrorOn = !mirrorOn; break;
-	case OPT_STAMPSIZE: stampDragSize = !stampDragSize; break;
+	case OPT_CRISP: if (optTool == TOOL_TEXT) textCrisp = !textCrisp; else tfCrisp = !tfCrisp; break;
+	case OPT_SELOP: selOp = (SelOp)((selOp + 3 + dir) % 3); break;
+	case OPT_TOLERANCE: wandTol = wandTol + dir * 5 < 0 ? 0 : wandTol + dir * 5 > 100 ? 100 : wandTol + dir * 5; break;
+	case OPT_SAMPLE: wandSampleAll = !wandSampleAll; break;
+	case OPT_ERASEMODE: eraserLine = !eraserLine; break;
 	default: break;
 	}
 }
@@ -664,6 +824,18 @@ static void run_option_action(OptKind k)
 		else set_status("Tap the canvas to type new text");
 		break;
 	case OPT_TEXTPLACE: text_place(); break;
+	case OPT_INVERT: sel_invert(&doc); break;
+	case OPT_AXISRESET: mirrorAX2 = mirrorAY2 = 0; break;
+	case OPT_TRANSFORM:
+		if (!layer_editable()) break;
+		if (!sel_active()) sel_all(&doc);           // nothing selected: transform the whole layer
+		if (!sel_floating()) sel_lift(&doc);
+		set_status("Corners: size  Edges: stretch  Top dot: rotate  B: apply");
+		break;
+	case OPT_APPLY:
+		if (tool == TOOL_TEXT) text_place();
+		else { finish_floating(); if (tool == TOOL_STAMP) sel_clear(&doc); }
+		break;
 	case OPT_CROP:
 	{
 		finish_floating();
@@ -714,6 +886,7 @@ static void tool_summary(Tool t, char* out, size_t n)
 	case TOOL_MIRROR:
 		snprintf(out, n, "%s", mirrorOn ? MIRROR_NAMES[mirrorMode] : "Off"); break;
 	case TOOL_ERASER:
+		snprintf(out, n, "%d %s%s", b->size, SHAPE_NAMES[b->shape], eraserLine ? " line" : ""); break;
 	case TOOL_LINE:
 		snprintf(out, n, "%d %s", b->size, SHAPE_NAMES[b->shape]); break;
 	case TOOL_RECT:
@@ -727,7 +900,7 @@ static void tool_summary(Tool t, char* out, size_t n)
 		if (sel_active()) { Rect r = sel_rect(); snprintf(out, n, "%s %dx%d", SELMODE_NAMES[selMode], r.w, r.h); }
 		else snprintf(out, n, "%s", SELMODE_NAMES[selMode]);
 		break;
-	case TOOL_STAMP: snprintf(out, n, "%s%s", stampCount ? stampNames[stampSel] : "none", stampDragSize ? " (drag)" : ""); break;
+	case TOOL_STAMP: snprintf(out, n, "%s", stampCount ? stampNames[stampSel] : "none"); break;
 	case TOOL_TEXT: snprintf(out, n, "%s %dx", FONTS[textFont].name, textScale); break;
 	default: out[0] = 0; break;
 	}
@@ -837,6 +1010,7 @@ static void open_project(const char* name)
 	char path[160];
 	project_path(path, sizeof(path), name);
 	sel_reset();
+	mirrorAX2 = mirrorAY2 = 0;
 	const char* err = pxd_load(&doc, path);
 	if (err)
 	{
@@ -856,6 +1030,7 @@ static void open_project(const char* name)
 static void new_canvas(int w, int h)
 {
 	sel_reset();
+	mirrorAX2 = mirrorAY2 = 0;
 	if (!doc_new(&doc, w, h))
 	{
 		set_status("Couldn't create canvas");
@@ -1127,8 +1302,37 @@ static int layer_rows(int* rows)
 	return n;
 }
 
+// Small previews for the layer panel (borrow the gallery's thumbnail slots 0..15).
+static bool layerThumbsDirty = true;
+static int layerThumbW[DOC_MAX_LAYERS], layerThumbH[DOC_MAX_LAYERS];
+
+static void make_layer_thumbs(void)
+{
+	static uint32_t th[PXD_THUMB * PXD_THUMB];
+	int w = doc.w, h = doc.h;
+	int up = PXD_THUMB / (w > h ? w : h), tw, tht;
+	if (up >= 1) { tw = w * up; tht = h * up; }
+	else if (w >= h) { tw = PXD_THUMB; tht = h * PXD_THUMB / w; }
+	else { tht = PXD_THUMB; tw = w * PXD_THUMB / h; }
+	if (tw < 1) tw = 1;
+	if (tht < 1) tht = 1;
+	for (int i = 0; i < doc.layerCount; i++)
+	{
+		if (doc.layers[i].isFolder) continue;
+		const uint8_t* cel = doc.layers[i].cels[doc.curFrame];
+		for (int y = 0; y < tht; y++)
+			for (int x = 0; x < tw; x++)
+				th[y * tw + x] = doc_color(&doc, cel[(y * h / tht) * w + x * w / tw]);
+		gfx_thumb_set(i, th, tw, tht);
+		layerThumbW[i] = tw;
+		layerThumbH[i] = tht;
+	}
+	layerThumbsDirty = false;
+}
+
 static void open_layers(void)
 {
+	layerThumbsDirty = true;
 	finish_floating();
 	layerCursor = doc.curLayer;
 	mode = MODE_LAYERS;
@@ -1164,6 +1368,7 @@ static void run_layer_action(int a)
 		else set_status("Not a folder");
 		break;
 	}
+	layerThumbsDirty = true;
 	if (structural)
 	{
 		if (r >= 0) { hist_commit(); doc.dirty = true; layerCursor = r; }
@@ -1491,6 +1696,7 @@ static void update_more_menus(u32 kDown, u32 kHeld, touchPosition touch)
 		{
 			sel_clear(&doc);
 			hist_begin(&doc);
+			mirrorAX2 = mirrorAY2 = 0;
 			if (doc_resize(&doc, resizeW, resizeH, anchorX, anchorY)) { hist_commit(); doc.dirty = true; view_fit(); set_status("Canvas resized"); }
 			else { hist_abort(); set_status("Couldn't resize"); }
 			after_doc_change();
@@ -2034,6 +2240,14 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		}
 		if ((kDown & KEY_B) && tool == TOOL_TEXT && textOn)
 			text_place();
+		else if ((kDown & KEY_B) && tool == TOOL_STAMP && sel_floating())
+		{
+			finish_floating();       // place the stamp
+			sel_clear(&doc);
+			after_doc_change();
+		}
+		else if ((kDown & KEY_B) && tool == TOOL_SELECT && sel_floating())
+			finish_floating();       // apply the move/transform, keep the selection
 		else if (kDown & KEY_B)
 		{
 			if (tool == TOOL_SELECT && sel_active())
@@ -2065,198 +2279,169 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	bool dropper = (kHeld & KEY_R) || tool == TOOL_EYEDROPPER;
 	uint8_t value = tool == TOOL_ERASER ? PIX_TRANSPARENT : strokeValue;
 
-	if (tool == TOOL_TEXT && !(kHeld & KEY_R) &&
-	    (touchTarget == TOUCH_CANVAS || ((kDown & KEY_TOUCH) && touch.py >= STRIP_H)))
+	// ---- ZR held when the stylus touches down: drag the canvas (hand tool) ----
+	if ((kDown & KEY_TOUCH) && (kHeld & KEY_ZR) && touch.py >= STRIP_H && touchTarget == TOUCH_NONE &&
+	    !((tool == TOOL_SELECT || tool == TOOL_STAMP || tool == TOOL_TEXT) && sel_floating() && tf_hit(touch.px, touch.py) >= 0))
 	{
-		int cx, cy;
-		screen_to_canvas(touch.px, touch.py, &cx, &cy);
-		if (kDown & KEY_TOUCH)
+		touchTarget = TOUCH_PAN;
+		panLastX = touch.px;
+		panLastY = touch.py;
+		return;
+	}
+	if (touchTarget == TOUCH_PAN)
+	{
+		if (kHeld & KEY_TOUCH)
 		{
-			touchTarget = TOUCH_CANVAS;
-			selDrag = SEL_IDLE;
-			float hx = 0, hy = 0;
-			if (textOn) text_handle(&hx, &hy);
-			if (textOn && touch.px >= hx - 4 && touch.px < hx + HANDLE + 4 && touch.py >= hy - 4 && touch.py < hy + HANDLE + 4)
-			{
-				textSizing = true;                  // grab the resize handle
-				textMoved = true;
-				selDrag = SEL_SIZING;
-			}
-			else if (textOn && sel_contains(cx, cy))
-			{
-				Rect r = sel_rect();
-				moveOffX = cx - r.x;
-				moveOffY = cy - r.y;
-				startCX = cx;
-				startCY = cy;
-				textMoved = false;
-				selDrag = SEL_MOVING;
-			}
-			else if (textOn)
-				text_place();                       // tap outside places the text
-			else if (layer_editable())
-			{
-				text_start(cx, cy);
-				touchTarget = TOUCH_STRIP;          // the keyboard ate this touch
-				return;
-			}
+			viewX -= (touch.px - panLastX) / zoom();
+			viewY -= (touch.py - panLastY) / zoom();
+			view_clamp();
+			panLastX = touch.px;
+			panLastY = touch.py;
 		}
-		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_SIZING && textSizing)
-		{
-			// whole-number sizes keep pixels crisp: pick the scale whose width is closest
-			Rect r = sel_rect();
-			int pad = textOutline >= 0 ? 1 : 0;
-			int unit = (r.w - 2 * pad) / textScale;   // width at 1x
-			int unitH = (r.h - 2 * pad) / textScale;
-			if (unit < 1) unit = 1;
-			if (unitH < 1) unitH = 1;
-			float want = fmaxf((float)(cx - r.x + 1) / unit, (float)(cy - r.y + 1) / unitH);
-			int ns = (int)lroundf(want);
-			if (ns < 1) ns = 1;
-			if (ns > TEXT_MAX_SCALE) ns = TEXT_MAX_SCALE;
-			if (ns != textScale)
-			{
-				textScale = ns;
-				text_refresh();
-			}
-		}
-		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_MOVING && (textMoved || cx != startCX || cy != startCY))
-		{
-			textMoved = true;
-			sel_move_to(&doc, cx - moveOffX, cy - moveOffY);
-			after_doc_change();
-		}
-		if (!(kHeld & KEY_TOUCH))
-		{
-			if (selDrag == SEL_MOVING && !textMoved)
-				text_edit();                        // tapped the text: retype it
-			textSizing = false;
-			selDrag = SEL_IDLE;
+		else
 			touchTarget = TOUCH_NONE;
-		}
 		return;
 	}
 
-	if ((tool == TOOL_SELECT || tool == TOOL_STAMP) && !(kHeld & KEY_R) &&
+	// ---- Select / Stamp / Text: selections and floating pixels with transform handles ----
+	if ((tool == TOOL_SELECT || tool == TOOL_STAMP || tool == TOOL_TEXT) && !(kHeld & KEY_R) &&
 	    (touchTarget == TOUCH_CANVAS || ((kDown & KEY_TOUCH) && touch.py >= STRIP_H)))
 	{
-		int cx, cy;
-		screen_to_canvas(touch.px, touch.py, &cx, &cy);
+		float fx = (touch.px - canvas_sx()) / zoom(), fy = (touch.py - canvas_sy()) / zoom();  // canvas coords
+		int cx = (int)floorf(fx), cy = (int)floorf(fy);
+		bool crisp = tool == TOOL_TEXT ? textCrisp : tfCrisp;
 		if (kDown & KEY_TOUCH)
 		{
 			touchTarget = TOUCH_CANVAS;
 			startCX = cx;
 			startCY = cy;
-			if (tool == TOOL_STAMP)
+			selDrag = SEL_IDLE;
+			tfDrag = TF_NONE;
+			tfMoved = false;
+			int hit = sel_floating() ? tf_hit(touch.px, touch.py) : -1;
+			if (hit >= 0)
+				tf_begin(hit);                                     // grabbed a handle
+			else if (sel_floating() && tf_inside(fx, fy))
 			{
-				free(stampPx);
-				stampPx = NULL;
-				if (!stampCount) { set_status("No stamps yet - save one with Select, A"); selDrag = SEL_IDLE; }
-				else if (!layer_editable()) selDrag = SEL_IDLE;
-				else if (stamp_load(STAMP_DIR, stampNames[stampSel], &doc, &stampPx, &stampW, &stampH)) { set_status("Couldn't load stamp"); selDrag = SEL_IDLE; }
-				else
-				{
-					// a tap places it at original size, centered on the stylus
-					moveOffX = stampW / 2;
-					moveOffY = stampH / 2;
-					sel_float_pixels(&doc, stampPx, stampW, stampH, cx - moveOffX, cy - moveOffY);
-					sel_set_float_mirror(mirrorOn ? mirrorMode : MIRROR_OFF);
-					selDrag = stampDragSize ? SEL_SIZING : SEL_MOVING;
-				}
-			}
-			else if (sel_contains(cx, cy))
-			{
-				if (!sel_floating() && !layer_editable()) selDrag = SEL_IDLE;
-				else
-				{
-					if (!sel_floating()) sel_lift(&doc);
-					Rect r = sel_rect();
-					moveOffX = cx - r.x;
-					moveOffY = cy - r.y;
-					selDrag = SEL_MOVING;
-				}
-			}
-			else if (selMode == SELMODE_WAND)
-			{
-				sel_wand(&doc, cx, cy, wandAll);
-				selDrag = SEL_IDLE;
-			}
-			else if (selMode == SELMODE_LASSO)
-			{
-				sel_clear(&doc);
-				lassoCount = 0;
-				lassoPts[0] = cx;
-				lassoPts[1] = cy;
-				lassoCount = 1;
-				selDrag = SEL_LASSO;
+				float x, y, w, h, a;
+				sel_transform_get(&x, &y, &w, &h, &a);
+				Rect r = sel_rect();
+				tfMoveOffX = fx - r.x;
+				tfMoveOffY = fy - r.y;
+				tfDrag = TF_MOVE;
 			}
 			else
 			{
-				sel_set(&doc, cx, cy, cx, cy);   // also drops any floating pixels
-				selDrag = SEL_DRAWING;
+				// outside floating pixels: drop them, then carry on with this tap
+				bool wasFloating = sel_floating();
+				if (tool == TOOL_TEXT && textOn) text_place();
+				else if (wasFloating) { finish_floating(); if (tool == TOOL_STAMP) sel_clear(&doc); }
+				if (tool == TOOL_TEXT)
+				{
+					if (!wasFloating && layer_editable())
+					{
+						text_start(cx, cy);
+						touchTarget = TOUCH_STRIP;                 // the keyboard ate this touch
+						after_doc_change();
+						return;
+					}
+				}
+				else if (tool == TOOL_STAMP)
+				{
+					uint8_t* px;
+					int w, h;
+					if (!stampCount) set_status("No stamps yet - save one with Select, A");
+					else if (!layer_editable()) {}
+					else if (stamp_load(STAMP_DIR, stampNames[stampSel], &doc, &px, &w, &h)) set_status("Couldn't load stamp");
+					else
+					{
+						sel_float_pixels(&doc, px, w, h, cx - w / 2, cy - h / 2);   // centred on the stylus
+						sel_set_float_mirror(mirrorOn ? mirrorMode : MIRROR_OFF);
+	sel_set_mirror_axis(mirrorAX2, mirrorAY2);
+						free(px);
+						tfMoveOffX = w / 2;
+						tfMoveOffY = h / 2;
+						tfDrag = TF_MOVE;                          // keep dragging to position it
+					}
+				}
+				else if (sel_contains(cx, cy) && selOp == SELOP_NEW)
+					selDrag = SEL_PENDING;                         // tap = new selection, drag = move it
+				else if (selMode == SELMODE_WAND)
+					sel_wand(&doc, cx, cy, wandAll, wandTol, wandSampleAll, selOp);
+				else if (selMode == SELMODE_LASSO)
+				{
+					if (selOp == SELOP_NEW) sel_clear(&doc);
+					lassoPts[0] = cx;
+					lassoPts[1] = cy;
+					lassoCount = 1;
+					selDrag = SEL_LASSO;
+				}
+				else
+				{
+					if (selOp == SELOP_NEW) sel_set(&doc, cx, cy, cx, cy);
+					selDrag = SEL_DRAWING;
+				}
 			}
 		}
-		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_DRAWING)
-			sel_set(&doc, startCX, startCY, cx, cy);
-		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_LASSO && lassoCount < LASSO_MAX &&
-		         (cx != lassoPts[(lassoCount - 1) * 2] || cy != lassoPts[(lassoCount - 1) * 2 + 1]))
+		else if (kHeld & KEY_TOUCH)
 		{
-			lassoPts[lassoCount * 2] = cx;
-			lassoPts[lassoCount * 2 + 1] = cy;
-			lassoCount++;
-		}
-		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_MOVING)
-			sel_move_to(&doc, cx - moveOffX, cy - moveOffY);
-		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_SIZING && (cx != startCX || cy != startCY))
-		{
-			// stamp scaled into the box from the touch point to the stylus (ZR keeps proportions)
-			int w = abs(cx - startCX) + 1, h = abs(cy - startCY) + 1;
-			if (kHeld & KEY_ZR)
+			if (cx != startCX || cy != startCY) tfMoved = true;
+			if (tfDrag == TF_MOVE && tfMoved)
+				sel_move_to(&doc, (int)floorf(fx - tfMoveOffX + 0.5f), (int)floorf(fy - tfMoveOffY + 0.5f));
+			else if (tfDrag != TF_NONE && tfDrag != TF_MOVE)
+				tf_drag(fx, fy, kHeld & KEY_ZR, crisp);
+			else if (selDrag == SEL_PENDING && tfMoved)
 			{
-				float s = fmaxf((float)w / stampW, (float)h / stampH);
-				w = (int)lroundf(stampW * s);
-				h = (int)lroundf(stampH * s);
-				if (w < 1) w = 1;
-				if (h < 1) h = 1;
+				// dragging inside the selection: lift it and move
+				if (layer_editable())
+				{
+					sel_lift(&doc);
+					Rect r = sel_rect();
+					tfMoveOffX = startCX - r.x;
+					tfMoveOffY = startCY - r.y;
+					tfDrag = TF_MOVE;
+					sel_move_to(&doc, (int)floorf(fx - tfMoveOffX + 0.5f), (int)floorf(fy - tfMoveOffY + 0.5f));
+				}
+				selDrag = SEL_IDLE;
 			}
-			if (w > DOC_MAX_W * 2) w = DOC_MAX_W * 2;
-			if (h > DOC_MAX_H * 2) h = DOC_MAX_H * 2;
-			uint8_t* scaled = malloc((size_t)w * h);
-			if (scaled)
+			else if (selDrag == SEL_DRAWING && selOp == SELOP_NEW)
+				sel_set(&doc, startCX, startCY, cx, cy);
+			else if (selDrag == SEL_LASSO && lassoCount < LASSO_MAX &&
+			         (cx != lassoPts[(lassoCount - 1) * 2] || cy != lassoPts[(lassoCount - 1) * 2 + 1]))
 			{
-				for (int j = 0; j < h; j++)
-					for (int i = 0; i < w; i++)
-						scaled[j * w + i] = stampPx[(j * stampH / h) * stampW + i * stampW / w];
-				int x = cx >= startCX ? startCX : startCX - w + 1;
-				int y = cy >= startCY ? startCY : startCY - h + 1;
-				sel_float_replace(&doc, scaled, w, h, x, y);
-				free(scaled);
+				lassoPts[lassoCount * 2] = cx;
+				lassoPts[lassoCount * 2 + 1] = cy;
+				lassoCount++;
 			}
-		}
-		if (kHeld & KEY_TOUCH)
-		{
 			selLastCX = cx;
 			selLastCY = cy;
 		}
-
 		if (!(kHeld & KEY_TOUCH))
 		{
-			if (selDrag == SEL_DRAWING && startCX == selLastCX && startCY == selLastCY)
-				sel_clear(&doc);                 // a tap outside deselects
-			if (selDrag == SEL_LASSO)
+			bool tap = !tfMoved;
+			if (tfDrag == TF_ROTATE || tfDrag == TF_CORNER || tfDrag == TF_EDGE)
+				tf_end();                                          // final, smoother resample
+			else if (tfDrag == TF_MOVE && tap && tool == TOOL_TEXT)
+				text_edit();                                       // tapped the text: retype it
+			else if (selDrag == SEL_PENDING)
 			{
-				if (lassoCount > 2) sel_lasso(&doc, lassoPts, lassoCount);
+				// tapped inside the selection without dragging
+				if (selMode == SELMODE_WAND) sel_wand(&doc, startCX, startCY, wandAll, wandTol, wandSampleAll, SELOP_NEW);
 				else sel_clear(&doc);
-				lassoCount = 0;
 			}
-			if (tool == TOOL_STAMP && (selDrag == SEL_MOVING || selDrag == SEL_SIZING))
+			else if (selDrag == SEL_DRAWING)
 			{
-				sel_commit(&doc);                // place the stamp
-				sel_clear(&doc);
+				if (selOp == SELOP_NEW) { if (tap) sel_clear(&doc); }
+				else if (!tap) sel_rect_op(&doc, startCX, startCY, selLastCX, selLastCY, selOp);
 			}
-			free(stampPx);
-			stampPx = NULL;
+			else if (selDrag == SEL_LASSO)
+			{
+				if (lassoCount > 2) sel_lasso(&doc, lassoPts, lassoCount, selOp);
+				else if (selOp == SELOP_NEW) sel_clear(&doc);
+			}
+			lassoCount = 0;
 			selDrag = SEL_IDLE;
+			tfDrag = TF_NONE;
 			touchTarget = TOUCH_NONE;
 		}
 		after_doc_change();
@@ -2328,6 +2513,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 					tools_set_value_map(shadeMap);
 				}
 				hist_begin(&doc);
+				tools_set_mirror_axis(mirrorAX2, mirrorAY2);
 				tools_begin(&doc, mirrorOn ? mirrorMode : MIRROR_OFF);
 				tools_set_clip(sel_active() ? sel_contains : NULL);   // paint inside the selection only
 				strokeActive = true;
@@ -2335,7 +2521,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 					tools_fill(cx, cy, strokeValue, fillMode == FILL_REPLACE);
 				else if (tool == TOOL_FILL)
 					tools_gradient_fill(cx, cy, cx, cy, strokeValue);
-				else if (tool == TOOL_PENCIL || tool == TOOL_ERASER || tool == TOOL_SHADE)
+				else if (tool == TOOL_PENCIL || (tool == TOOL_ERASER && !eraserLine) || tool == TOOL_SHADE)
 					tools_stroke_start(cx, cy, value, &brushes[tool]);
 				// shapes are drawn below while dragging
 			}
@@ -2348,7 +2534,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		screen_to_canvas(touch.px, touch.py, &cx, &cy);
 		if (dropper && !strokeActive)
 			eyedrop(cx, cy);
-		else if (strokeActive && (tool == TOOL_PENCIL || tool == TOOL_ERASER || tool == TOOL_SHADE) && !(kDown & KEY_TOUCH))
+		else if (strokeActive && (tool == TOOL_PENCIL || (tool == TOOL_ERASER && !eraserLine) || tool == TOOL_SHADE) && !(kDown & KEY_TOUCH))
 			tools_stroke_to(cx, cy, value, &brushes[tool]);
 		else if (strokeActive && tool == TOOL_FILL && fillMode == FILL_GRADIENT && !(kDown & KEY_TOUCH))
 		{
@@ -2370,7 +2556,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			{
 				tools_restore();
 				bool snap = kHeld & KEY_ZR;
-				if (tool == TOOL_LINE)
+				if (tool == TOOL_LINE || tool == TOOL_ERASER)
 				{
 					if (snap) tools_snap_line(startCX, startCY, &cx, &cy);
 					tools_line(startCX, startCY, cx, cy, value, &brushes[tool]);
@@ -2497,14 +2683,16 @@ static void draw_bottom(void)
 	}
 
 	// mirror guides
-	if (mirrorOn && tool != TOOL_SELECT && tool != TOOL_EYEDROPPER)
+	bool mirrorPanel = mode == MODE_OPTIONS && optTool == TOOL_MIRROR;
+	if ((mirrorOn && tool != TOOL_SELECT && tool != TOOL_EYEDROPPER) || mirrorPanel)
 	{
+		float axX = (mirrorAX2 ? mirrorAX2 : doc.w) / 2.0f, axY = (mirrorAY2 ? mirrorAY2 : doc.h) / 2.0f;
 		u32 mc = C2D_Color32(0xFF, 0x50, 0xC8, 0xB0);
 		if (mirrorMode == MIRROR_X || mirrorMode == MIRROR_XY)
-			C2D_DrawRectSolid(sx + doc.w * z / 2 - (z >= 4 ? 1 : 0.5f), sy < VIEW_Y ? VIEW_Y : sy, 0.5f, z >= 4 ? 2 : 1, doc.h * z, mc);
+			C2D_DrawRectSolid(sx + axX * z - (z >= 4 ? 1 : 0.5f), sy < VIEW_Y ? VIEW_Y : sy, 0.5f, z >= 4 ? 2 : 1, doc.h * z, mc);
 		if (mirrorMode == MIRROR_Y || mirrorMode == MIRROR_XY)
 		{
-			float gy = sy + doc.h * z / 2;
+			float gy = sy + axY * z;
 			if (gy >= VIEW_Y)
 				C2D_DrawRectSolid(sx, gy - (z >= 4 ? 1 : 0.5f), 0.5f, doc.w * z, z >= 4 ? 2 : 1, mc);
 		}
@@ -2545,7 +2733,9 @@ static void draw_bottom(void)
 	}
 
 	// shaped selection: outline the selected pixels
-	if (sel_active() && (sel_has_mask() || (sel_floating() && tool == TOOL_SELECT)))
+	bool transforming = sel_floating() && (tool == TOOL_SELECT || tool == TOOL_STAMP || tool == TOOL_TEXT);
+	if (transforming) {}
+	else if (sel_active() && sel_has_mask())
 	{
 		Rect r = sel_rect();
 		static int phase2;
@@ -2589,25 +2779,38 @@ static void draw_bottom(void)
 		}
 	}
 
-	// text resize handle
-	if (tool == TOOL_TEXT && textOn && sel_floating())
+	// transform box for floating pixels
+	if ((tool == TOOL_SELECT || tool == TOOL_STAMP || tool == TOOL_TEXT) && sel_floating())
 	{
-		float hx, hy;
-		text_handle(&hx, &hy);
-		if (hy + HANDLE > VIEW_Y)
+		float hx[9], hy[9];
+		for (int k = 0; k < 9; k++) tf_screen(k, &hx[k], &hy[k]);
+		u32 lc = C2D_Color32(255, 255, 255, 230), dk = C2D_Color32(0, 0, 0, 255);
+		for (int k = 0; k < 4; k++)
 		{
-			C2D_DrawRectSolid(hx, hy, 0.5f, HANDLE, HANDLE, C2D_Color32(0, 0, 0, 255));
-			C2D_DrawRectSolid(hx + 1, hy + 1, 0.5f, HANDLE - 2, HANDLE - 2, C_ACCENT);
-			// diagonal arrow
-			u32 k = C2D_Color32(0, 0, 0, 255);
-			C2D_DrawLine(hx + 3, hy + 3, k, hx + HANDLE - 4, hy + HANDLE - 4, k, 1.5f, 0.5f);
-			C2D_DrawRectSolid(hx + HANDLE - 8, hy + HANDLE - 5, 0.5f, 5, 1.5f, k);
-			C2D_DrawRectSolid(hx + HANDLE - 5, hy + HANDLE - 8, 0.5f, 1.5f, 5, k);
-			gfx_text(hx + HANDLE + 2, hy + 1, 0.4f, C_ACCENT, "%dx", textScale);
+			int n = (k + 1) % 4;
+			C2D_DrawLine(hx[k], hy[k], dk, hx[n], hy[n], dk, 3, 0.5f);
+			C2D_DrawLine(hx[k], hy[k], lc, hx[n], hy[n], lc, 1, 0.5f);
 		}
+		C2D_DrawLine(hx[4], hy[4], lc, hx[8], hy[8], lc, 1, 0.5f);
+		for (int k = 0; k < 8; k++)
+		{
+			float sz = k < 4 ? 8 : 6;
+			C2D_DrawRectSolid(hx[k] - sz / 2 - 1, hy[k] - sz / 2 - 1, 0.5f, sz + 2, sz + 2, dk);
+			C2D_DrawRectSolid(hx[k] - sz / 2, hy[k] - sz / 2, 0.5f, sz, sz, k < 4 ? C_ACCENT : C2D_Color32(255, 255, 255, 255));
+		}
+		C2D_DrawCircleSolid(hx[8], hy[8], 0.5f, 6, dk);
+		C2D_DrawCircleSolid(hx[8], hy[8], 0.5f, 5, C2D_Color32(0x30, 0xD0, 0xFF, 255));
+	}
+	// rectangle being added / subtracted
+	if (selDrag == SEL_DRAWING && selOp != SELOP_NEW)
+	{
+		int x0 = startCX < selLastCX ? startCX : selLastCX, x1 = startCX < selLastCX ? selLastCX : startCX;
+		int y0 = startCY < selLastCY ? startCY : selLastCY, y1 = startCY < selLastCY ? selLastCY : startCY;
+		gfx_rect_outline(sx + x0 * z, sy + y0 * z, (x1 - x0 + 1) * z, (y1 - y0 + 1) * z, 1,
+		                 selOp == SELOP_ADD ? C2D_Color32(120, 255, 120, 255) : C2D_Color32(255, 110, 110, 255));
 	}
 
-	if (mode != MODE_DRAW && mode != MODE_SHIFT && mode != MODE_RAMP && mode != MODE_ADJUST && mode != MODE_LAYERS)
+	if (mode != MODE_DRAW && mode != MODE_SHIFT && mode != MODE_RAMP && mode != MODE_ADJUST && mode != MODE_LAYERS && !mirrorPanel)
 		C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, BOT_H, C2D_Color32(0, 0, 0, 0x90));
 }
 
@@ -2681,13 +2884,14 @@ static void draw_top_tools(void)
 	else if (mode == MODE_PICKER)
 		gfx_text(10, 220, 0.45f, C_DIM, "Pick a color below.  A: OK   B: cancel");
 	else if (tool == TOOL_SELECT)
-		gfx_text(10, 222, 0.42f, C_DIM, "Drag: select / move.  A: actions  B: deselect");
+		gfx_text(10, 222, 0.42f, C_DIM, sel_floating() ? "Handles: size/rotate (ZR: stretch)  B: apply"
+		                                               : "Drag: select / move.  A: actions  B: deselect");
 	else if (tool == TOOL_TEXT)
-		gfx_text(10, 222, 0.42f, C_DIM, textOn ? "Drag: move  Corner tab: size  Tap: edit  B: place"
+		gfx_text(10, 222, 0.42f, C_DIM, textOn ? "Drag: move  Handles: size/rotate  Tap: edit  B: place"
 		                                       : "Tap the canvas to type.  A: font, size, outline");
 	else if (tool == TOOL_STAMP)
-		gfx_text(10, 222, 0.42f, C_DIM, stampDragSize ? "Drag a box to size it (ZR: keep shape).  A: options"
-		                                               : "Touch to place, drag to position.  A: options");
+		gfx_text(10, 222, 0.42f, C_DIM, sel_floating() ? "Handles: size/rotate (ZR: stretch)  B / tap outside: place"
+		                                               : "Touch to place a stamp.  A: pick stamp");
 	else if (is_shape(tool))
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag to draw. Hold ZR to snap, B cancels.");
 	else
@@ -2874,6 +3078,13 @@ static void draw_top(void)
 				C2D_DrawRectSolid(20, y - 1, 0.5f, 360, 13, C_SEL);
 			float x = L->folder >= 0 ? 44 : 26;
 			u32 c = i == doc.curLayer ? C_ACCENT : (doc_layer_visible(&doc, i) ? C_TEXT : C_DIM);
+			if (!L->isFolder)
+			{
+				if (layerThumbsDirty) make_layer_thumbs();
+				float ts = fminf(20.0f / layerThumbW[i], 11.0f / layerThumbH[i]);
+				gfx_draw_thumb(i, layerThumbW[i], layerThumbH[i], x, y, ts);
+				x += 24;
+			}
 			if (L->isFolder)
 				gfx_text(x, y - 1, 0.44f, c, "%s %s (%d)", L->collapsed ? "[+]" : "[-]", L->name, doc_folder_size(&doc, i));
 			else
@@ -3051,7 +3262,19 @@ int main(int argc, char* argv[])
 			}
 		}
 		else if (mode == MODE_OPTIONS)
+		{
 			update_options(kDown);
+			if (mode == MODE_OPTIONS && optTool == TOOL_MIRROR && (kHeld & KEY_TOUCH) && touch.py >= STRIP_H)
+			{
+				// touch the canvas to place the mirror axis (snaps to pixel edges and centres)
+				float fx = (touch.px - canvas_sx()) / zoom(), fy = (touch.py - canvas_sy()) / zoom();
+				int ax = (int)lroundf(fx * 2), ay = (int)lroundf(fy * 2);
+				if (mirrorMode == MIRROR_X || mirrorMode == MIRROR_XY)
+					mirrorAX2 = ax < 1 ? 1 : ax > doc.w * 2 - 1 ? doc.w * 2 - 1 : ax;
+				if (mirrorMode == MIRROR_Y || mirrorMode == MIRROR_XY)
+					mirrorAY2 = ay < 1 ? 1 : ay > doc.h * 2 - 1 ? doc.h * 2 - 1 : ay;
+			}
+		}
 		else if (mode == MODE_SHIFT)
 			update_shift(kDown, kHeld, touch);
 		else if (mode == MODE_HOME)

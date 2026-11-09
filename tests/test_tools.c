@@ -119,6 +119,17 @@ int main(void)
 	tools_set_clip(NULL);
 	assert(at(0, 0) == 0 && at(1, 0) == 0 && at(2, 0) == 6 && at(4, 0) == 6);
 
+	// movable mirror axis: x2 = 4 means the axis sits at x = 2.0 (between pixels 1 and 2)
+	doc_new(&d, 8, 1);
+	tools_set_mirror_axis(4, 0);
+	tools_begin(&d, MIRROR_X);
+	tools_stroke_start(0, 0, 1, &b1);
+	assert(at(0, 0) == 1 && at(3, 0) == 1 && count(1) == 2);
+	tools_set_mirror_axis(5, 0);                 // axis through the centre of pixel 2
+	tools_stroke_start(1, 0, 2, &b1);
+	assert(at(1, 0) == 2 && at(3, 0) == 2);
+	tools_set_mirror_axis(0, 0);
+
 	doc_free(&d);
 	hist_clear();
 	puts("ok");

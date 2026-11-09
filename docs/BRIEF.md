@@ -85,6 +85,10 @@ Stylus in right hand, frequent actions on left.
   Crow Term and Crow Industrial), size 1-4x, spacing, outline, multiline, move/retype/place.
 - **M6 (v0.6.0):** Home screen on launch: New (size tiles) and Gallery (thumbnails, newest first,
   open/rename/copy/delete/export); thumbnails stored in .pxd (THMB chunk).
+- **v0.8.0 (review pass, 2026-11-09):** Transform handles for all floating pixels (proportional by
+  default, ZR stretch, free rotation with Scale2x/RotSprite-style resampling, crisp option); magic
+  wand tolerance + sample all layers; selection Add/Subtract; invert; tap vs drag inside a selection;
+  layer thumbnails; movable mirror axis; ZR+stylus pan; eraser line mode; icon background = banner navy.
 - **Next (Alex picks):**
   - **Camera mode** (filters → pixel art; shelved for now), **left-handed mode**.
   - **v2 animator** after layers.

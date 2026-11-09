@@ -20,21 +20,19 @@ The app opens on **Home** (also START → Home). START on Home exits the app:
 | START → Linked swatches | Per project. On: editing a swatch also recolors every pixel of that color (like Aseprite's indexed mode). Off by default |
 | Hold R + tap a swatch | Save the current color (e.g. from the eyedropper) into that swatch |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror axis) |
-| D-pad up/down | Previous / next tool: Pencil, Eraser, Fill, Shade, Line, Rectangle, Ellipse, Select, Stamp, Text, Eyedropper. Last entry **Mirror** opens Mirror On/Off + axis, which applies to all drawing tools and stamps |
-| Select tool | Mode (A): Rectangle, Magic wand (connected or all of a color), Lasso. Drag inside a selection to move it. The selection stays when you switch tools, and drawing tools then only paint inside it. Copy/paste work across projects. A = actions (copy, cut, paste, delete, flip, rotate, outline, crop canvas to selection, save as stamp); B deselects |
-| Fill tool | Mode (A): Connected area, Replace color, or Gradient: drag to fade the current color into the area with a 4x4 dither |
-| Shade tool | Paint over pixels to step them one swatch lighter (right) or darker (left); A sets direction and brush |
-| Text tool | Tap the canvas and type (multiple lines OK). Drag to move, drag the corner tab to resize (1-32x, stays crisp), tap the text to retype, B or tap outside to place. A: font (6, see [fonts](docs/FONTS.md)), size 1-32x, spacing, outline color |
-| Stamp tool | A: pick a stamp, Size Original or Drag to size. Original: touch to place, drag to position. Drag to size: drag a box to scale it (ZR keeps proportions); a tap places it at original size |
+| D-pad up/down | Previous / next tool: Pencil, Eraser, Fill, Shade, Line, Rectangle, Ellipse, Select, Stamp, Text, Eyedropper. Last entry **Mirror** opens Mirror On/Off + axis; while it's open, touch the canvas to move the mirror line. Applies to all drawing tools and stamps. Eraser has a Line mode |
+| Select tool | Mode (A): Rectangle, Magic wand (tolerance 0-100%, connected or all of a color, samples all visible layers or the current one), Lasso. Combine: New / Add / Subtract. Tap inside a selection = new selection, drag inside = move it. Actions: Transform, select all, deselect, invert, copy, cut, paste, delete, flip, rotate 90, outline, crop canvas, save as stamp. B deselects (or applies a transform). The selection stays when you switch tools and drawing stays inside it |
+| Transform (anything floating: moved/pasted selections, stamps, text) | Corner handles resize proportionally (hold ZR while dragging to stretch freely), edge handles stretch one way, the blue dot rotates (ZR: 15 degree steps), drag inside to move. Always resamples from the original pixels; "Crisp sizes" snaps to whole multiples. B or tapping outside applies it |
+| Stamp tool | A: pick a stamp. Touch to place it, then use the transform handles; tapping outside places it and starts the next one |
 | Hold R + stylus | Eyedropper |
-| Hold ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 |
+| Press ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 (ZR held *before* touching pans instead) |
 | B while dragging a shape | Cancel the shape |
 | L / ZL | Undo / redo |
 | D-pad right/left | Zoom in / out (¼x to 24x) |
 | B | Toggle eraser (back to your previous tool on the next press). In Select it deselects; while dragging a shape it cancels |
-| Circle pad | Pan |
+| Circle pad | Pan (or hold ZR, then touch and drag the canvas) |
 | X | Grid on/off (zoom 4x and up) |
-| Y | Layers: up/down pick, X show/hide, left/right opacity, L/R move, A = new layer/folder, duplicate, delete, move, merge down/visible, lock, rename, collapse folder |
+| Y | Layers (with thumbnails): up/down pick, X show/hide, left/right opacity, L/R move, A = new layer/folder, duplicate, delete, move, merge down/visible, lock, rename, collapse folder |
 | Bottom row of the palette strip | Recent colors (tap to reuse) |
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… |
 | START | Menu: Home (new / gallery), save, save as, import PNG, export PNG, canvas size (with anchor), shift layer, Colors (ramp between swatches, adjust hue/saturation/brightness/invert), View (flip preview, 3x3 tile preview, HUD grid, isometric grid, autosave), linked swatches, exit |

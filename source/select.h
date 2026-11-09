@@ -13,9 +13,16 @@ bool sel_contains(int x, int y);
 bool sel_has_mask(void);             // false = the whole rectangle is selected
 bool sel_mask_at(int i, int j);      // inside the selection, relative to sel_rect()
 
-// Shaped selections on the current layer (replace the current selection).
-void sel_wand(Doc* d, int x, int y, bool allOfColor);  // same color, connected or everywhere
-void sel_lasso(Doc* d, const int* pts, int n);         // closed polygon, pts = x0,y0,x1,y1...
+// How a new selection combines with the current one.
+typedef enum { SELOP_NEW, SELOP_ADD, SELOP_SUBTRACT } SelOp;
+
+// Magic wand: pixels of a similar color, connected to (x,y) or anywhere. tolerance 0..100 (%):
+// 0 = exact color. sampleAll compares the colors you see (all visible layers), otherwise only
+// the current layer.
+void sel_wand(Doc* d, int x, int y, bool allOfColor, int tolerance, bool sampleAll, SelOp op);
+void sel_lasso(Doc* d, const int* pts, int n, SelOp op);  // closed polygon, pts = x0,y0,x1,y1...
+void sel_rect_op(Doc* d, int x0, int y0, int x1, int y1, SelOp op);
+void sel_invert(Doc* d);
 
 void sel_set(Doc* d, int x0, int y0, int x1, int y1); // corners, inclusive; clamped
 void sel_all(Doc* d);
@@ -31,8 +38,20 @@ void sel_float_pixels(Doc* d, const uint8_t* px, int w, int h, int x, int y);
 // Also draw mirrored copies of the floating pixels (used for stamps); reset on commit/cancel.
 #include "tools.h"
 void sel_set_float_mirror(Mirror m);
+void sel_set_mirror_axis(int ax2, int ay2);   // like tools_set_mirror_axis
 // Replace the floating pixels (e.g. a stamp being resized) without a new undo step.
 void sel_float_replace(Doc* d, const uint8_t* px, int w, int h, int x, int y);
+
+// ---- transform (floating pixels only) ----
+// The floating pixels keep their original "source" image; the transform box is position
+// (x, y), size (w, h) before rotation, and a rotation in degrees around the box centre.
+// Every change resamples from the source, so repeated resizing never degrades the art.
+void sel_transform_get(float* x, float* y, float* w, float* h, float* angle);
+void sel_source_size(int* w, int* h);
+// hq = smoother pixel-art rotation (slower; use when the stylus is lifted)
+void sel_transform(Doc* d, float x, float y, float w, float h, float angle, bool hq);
+// Swap in a new source image (e.g. retyped text) keeping position, scale and rotation.
+void sel_set_source(Doc* d, const uint8_t* px, int w, int h);
 
 // Actions (apply to the floating layer, or lift+apply+commit for a plain selection)
 void sel_copy(Doc* d);

@@ -10,6 +10,9 @@ static bool changed;
 static uint8_t orig[DOC_MAX_W * DOC_MAX_H];
 static uint8_t mask[DOC_MAX_W * DOC_MAX_H], mask2[DOC_MAX_W * DOC_MAX_H];
 static const uint8_t* valueMap;
+static int axisX2, axisY2;
+
+void tools_set_mirror_axis(int ax2, int ay2) { axisX2 = ax2; axisY2 = ay2; }
 static bool (*clipFn)(int x, int y);
 
 void tools_set_clip(bool (*inside)(int x, int y)) { clipFn = inside; }
@@ -56,7 +59,7 @@ static void set1(int x, int y, uint8_t v)
 static void put(int x, int y, uint8_t v)
 {
 	set1(x, y, v);
-	int mx = doc->w - 1 - x, my = doc->h - 1 - y;
+	int mx = (axisX2 ? axisX2 : doc->w) - 1 - x, my = (axisY2 ? axisY2 : doc->h) - 1 - y;
 	if (mirror == MIRROR_X || mirror == MIRROR_XY) set1(mx, y, v);
 	if (mirror == MIRROR_Y || mirror == MIRROR_XY) set1(x, my, v);
 	if (mirror == MIRROR_XY) set1(mx, my, v);
@@ -68,7 +71,7 @@ static void put_orig(int x, int y)
 {
 	if (x < 0 || y < 0 || x >= doc->w || y >= doc->h)
 		return;
-	int mx = doc->w - 1 - x, my = doc->h - 1 - y;
+	int mx = (axisX2 ? axisX2 : doc->w) - 1 - x, my = (axisY2 ? axisY2 : doc->h) - 1 - y;
 	set1(x, y, orig_at(x, y));
 	if (mirror == MIRROR_X || mirror == MIRROR_XY) set1(mx, y, orig_at(mx, y));
 	if (mirror == MIRROR_Y || mirror == MIRROR_XY) set1(x, my, orig_at(x, my));

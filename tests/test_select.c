@@ -119,10 +119,12 @@ int main(void)
 
 	// magic wand: connected vs all of color; moving keeps the shape
 	doc_new(&d, 5, 1); sel_reset();
+	d.colorCount = 4;
+	for (int i = 1; i <= 4; i++) d.colors[i] = 0x11223300u * i | 0xFF;
 	doc_pixels(&d)[0] = 4; doc_pixels(&d)[1] = 4; doc_pixels(&d)[3] = 4;
-	sel_wand(&d, 0, 0, false);
+	sel_wand(&d, 0, 0, false, 0, false, SELOP_NEW);
 	assert(sel_active() && sel_has_mask() == false && sel_rect().w == 2);   // full 2x1 rect
-	sel_wand(&d, 0, 0, true);
+	sel_wand(&d, 0, 0, true, 0, false, SELOP_NEW);
 	assert(sel_rect().x == 0 && sel_rect().w == 4 && sel_has_mask() && !sel_contains(2, 0) && sel_contains(3, 0));
 	sel_lift(&d);
 	sel_move_to(&d, 1, 0);
@@ -131,11 +133,39 @@ int main(void)
 	assert(sel_has_mask() && sel_contains(4, 0) && !sel_contains(3, 0));
 	sel_clear(&d);
 
+	// wand tolerance, sampling all layers, add / subtract, invert
+	doc_new(&d, 6, 1); sel_reset();
+	{
+		uint8_t a = doc_color_index(&d, 0x808080FF, true), b = doc_color_index(&d, 0x848484FF, true), c = doc_color_index(&d, 0xFF0000FF, true);
+		uint8_t* px = doc_pixels(&d);
+		px[0] = a; px[1] = b; px[2] = c; px[3] = a; px[4] = 0; px[5] = 0;
+		sel_wand(&d, 0, 0, false, 0, false, SELOP_NEW);
+		assert(sel_contains(0, 0) && !sel_contains(1, 0));               // exact only
+		sel_wand(&d, 0, 0, false, 5, false, SELOP_NEW);
+		assert(sel_contains(1, 0) && !sel_contains(2, 0) && !sel_contains(3, 0)); // 5% joins the near-gray
+		sel_wand(&d, 3, 0, false, 0, false, SELOP_ADD);
+		assert(sel_contains(0, 0) && sel_contains(1, 0) && sel_contains(3, 0) && !sel_contains(2, 0));
+		sel_wand(&d, 1, 0, false, 0, false, SELOP_SUBTRACT);
+		assert(sel_contains(0, 0) && !sel_contains(1, 0) && sel_contains(3, 0));
+		sel_invert(&d);
+		assert(!sel_contains(0, 0) && sel_contains(1, 0) && sel_contains(2, 0) && !sel_contains(3, 0) && sel_contains(5, 0));
+		sel_rect_op(&d, 4, 0, 5, 0, SELOP_SUBTRACT);
+		assert(!sel_contains(4, 0) && sel_contains(2, 0));
+		// sample all layers: art on another layer, wand from an empty layer
+		sel_clear(&d);
+		doc_layer_add(&d, false);                                           // empty layer on top, current
+		sel_wand(&d, 2, 0, false, 0, true, SELOP_NEW);
+		assert(sel_contains(2, 0) && !sel_contains(0, 0) && !sel_contains(4, 0));
+		sel_wand(&d, 2, 0, false, 0, false, SELOP_NEW);                     // current layer only: all empty
+		assert(sel_contains(0, 0) && sel_contains(5, 0));
+		sel_clear(&d);
+	}
+
 	// lasso: triangle
 	doc_new(&d, 10, 10); sel_reset();
 	{
 		int tri[] = { 0, 0, 9, 0, 0, 9 };
-		sel_lasso(&d, tri, 3);
+		sel_lasso(&d, tri, 3, SELOP_NEW);
 		assert(sel_active() && sel_contains(1, 1) && sel_contains(9, 0) && !sel_contains(9, 9) && !sel_contains(8, 8));
 		for (int i = 0; i < 100; i++) doc_pixels(&d)[i] = 1;
 		uint8_t* p; int w, h;
@@ -143,6 +173,41 @@ int main(void)
 		free(p);
 		sel_delete(&d);
 		assert(at(1, 1) == 0 && at(9, 9) == 1);
+	}
+
+	// transform: scale from the source, rotate, swap source keeps scale
+	doc_new(&d, 40, 40); sel_reset();
+	{
+		uint8_t img[6] = { 1, 2, 3, 4, 5, 6 };            // 3 x 2
+		sel_float_pixels(&d, img, 3, 2, 10, 10);
+		sel_transform(&d, 10, 10, 6, 4, 0, false);       // 2x
+		Rect r = sel_rect();
+		assert(r.x == 10 && r.y == 10 && r.w == 6 && r.h == 4);
+		assert(at(10, 10) == 1 && at(11, 11) == 1 && at(12, 10) == 2 && at(15, 13) == 6);
+		sel_transform(&d, 10, 10, 3, 2, 0, false);       // back to 1x: exact original, no loss
+		assert(at(10, 10) == 1 && at(12, 11) == 6 && at(13, 10) == 0);
+		sel_transform(&d, 10, 10, 3, 2, 90, true);       // 90 degrees around the centre
+		r = sel_rect();
+		assert(r.w == 2 && r.h == 3);
+		int n = 0; for (int k = 1; k <= 6; k++) n += count(k);
+		assert(n == 6);
+		sel_transform(&d, 10, 10, 6, 4, 45, true);        // any angle: bigger box, pixels kept
+		r = sel_rect();
+		assert(r.w > 6 && r.h > 4);
+		float x, y, w, h, a;
+		sel_transform_get(&x, &y, &w, &h, &a);
+		assert(w == 6 && h == 4 && a == 45);
+		uint8_t img2[2] = { 7, 7 };                      // retype: new 2 x 1 source, same 2x scale
+		sel_transform(&d, 10, 10, 6, 4, 0, false);
+		sel_set_source(&d, img2, 2, 1);
+		r = sel_rect();
+		assert(r.w == 4 && r.h == 2 && count(7) == 8);
+		sel_move_to(&d, 0, 0);
+		sel_transform_get(&x, &y, &w, &h, &a);
+		assert(x == 0 && y == 0);
+		sel_commit(&d);
+		assert(count(7) == 8);
+		sel_clear(&d);
 	}
 
 	// shift with wrap

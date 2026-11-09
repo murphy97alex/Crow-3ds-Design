@@ -15,6 +15,9 @@ typedef struct {
 	bool pixelPerfect;  // only used at size 1 with square/round
 } Brush;
 
+// Mirror axis as twice the centre coordinate (so it can sit between pixels); 0 = canvas centre.
+void tools_set_mirror_axis(int ax2, int ay2);
+
 // Start an operation: remembers the frame as it is now (for pixel-perfect and shape previews).
 bool tools_begin(Doc* d, Mirror mirror);
 void tools_restore(void);   // put the frame back to how it was at tools_begin
