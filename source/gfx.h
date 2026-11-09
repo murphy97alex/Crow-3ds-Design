@@ -21,6 +21,7 @@ void gfx_draw_canvas_ex(const Doc* d, float x, float y, float scale, bool flipX)
 #define GFX_THUMB_SLOTS 128
 void gfx_thumb_set(int slot, const uint32_t* rgba, int w, int h);
 void gfx_draw_thumb(int slot, int w, int h, float x, float y, float scale);
+void gfx_draw_thumb_ex(int slot, int w, int h, float x, float y, float scale, bool checker);
 
 // Checkerboard rectangle, cell = checker square size in screen pixels.
 void gfx_draw_checker(float x, float y, float w, float h, float cell);

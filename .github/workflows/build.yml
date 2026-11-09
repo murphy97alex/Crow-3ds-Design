@@ -60,12 +60,12 @@ jobs:
       - name: Collect outputs
         run: |
           mkdir -p dist
-          cp pixel-ui-designer.3dsx pixel-ui-designer.cia dist/
+          cp pixel-crow.3dsx pixel-crow.cia dist/
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pixel-ui-designer-${{ github.sha }}
+          name: pixel-crow-${{ github.sha }}
           path: dist/*
 
       - name: Publish release
@@ -75,6 +75,6 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
           target_commitish: ${{ github.sha }}
           files: |
-            dist/pixel-ui-designer.3dsx
-            dist/pixel-ui-designer.cia
+            dist/pixel-crow.3dsx
+            dist/pixel-crow.cia
           generate_release_notes: true

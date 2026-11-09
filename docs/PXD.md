@@ -1,6 +1,6 @@
 # `.pxd` project file format (version 3)
 
-One file per project, saved to `sdmc:/3ds/pixel-ui-designer/projects/<name>.pxd`.
+One file per project, saved to `sdmc:/3ds/pixel-crow/projects/<name>.pxd`.
 All integers are little-endian.
 
 ```

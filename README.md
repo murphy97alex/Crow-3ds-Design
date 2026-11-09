@@ -1,6 +1,8 @@
-# Pixel UI Designer (3DS)
+# Pixel Crow
 
-Homebrew pixel-art / UI drawing app for the New 3DS, written in C with
+![Pixel Crow banner](assets/banner.png)
+
+Homebrew pixel-art / UI drawing app for the New 3DS (formerly "Pixel UI Designer"), written in C with
 libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 
 ## Home screen
@@ -37,9 +39,9 @@ The app opens on **Home** (also START → Home). START on Home exits the app:
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… |
 | START | Menu: Home (new / gallery), save, save as, import PNG, export PNG, canvas size (with anchor), shift layer, Colors (ramp between swatches, adjust hue/saturation/brightness/invert), View (flip preview, 3x3 tile preview, HUD grid, isometric grid, autosave), linked swatches, exit |
 
-Projects are saved to `/3ds/pixel-ui-designer/projects/*.pxd` ([format](docs/PXD.md)),
-stamps to `/3ds/pixel-ui-designer/stamps/`, PNG exports to `/3ds/pixel-ui-designer/export/`,
-and PNGs to import go in `/3ds/pixel-ui-designer/import/`
+Projects are saved to `/3ds/pixel-crow/projects/*.pxd` ([format](docs/PXD.md)),
+stamps to `/3ds/pixel-crow/stamps/`, PNG exports to `/3ds/pixel-crow/export/`,
+and PNGs to import go in `/3ds/pixel-crow/import/`
 (named `<project>_<W>x<H>.png`) — grab them with ftpd.
 
 ## Install
@@ -48,7 +50,7 @@ newest release's `.cia`.
 
 ![Install QR](docs/install-qr.png)
 
-Link: https://github.com/murphy97alex/Crow-3ds-Design/releases/latest/download/pixel-ui-designer.cia
+Link: https://github.com/murphy97alex/Crow-3ds-Design/releases/latest/download/pixel-crow.cia
  Or copy the `.3dsx` to `/3ds/` on the SD
 card and launch it from the Homebrew Launcher.
 
@@ -63,6 +65,6 @@ make cia      # .cia (needs bannertool + makerom on PATH; scripts/fetch-tools.sh
 CI builds every push; pushing a `v*` tag publishes a GitHub release with both files.
 
 ## License
-MIT. The default palette is CC0 ([details](docs/PALETTE.md)). Fonts: see [docs/FONTS.md](docs/FONTS.md)
+MIT. Icon and banner art by Alex (murphy97alex), CC0 1.0. The default palette is CC0 ([details](docs/PALETTE.md)). Fonts: see [docs/FONTS.md](docs/FONTS.md)
 (Tom Thumb, PICO-8, Kenney Pixel and the Crow fonts are CC0; Spleen is BSD 2-Clause,
-[license](fonts/LICENSE-spleen.txt)). Icon, banner and banner sound are original placeholders generated for this repo.
+[license](fonts/LICENSE-spleen.txt)). The banner sound is an original placeholder generated for this repo.

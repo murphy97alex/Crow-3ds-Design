@@ -135,13 +135,18 @@ void gfx_thumb_set(int slot, const uint32_t* rgba, int w, int h)
 	C3D_TexFlush(&thumbTex);
 }
 
-void gfx_draw_thumb(int slot, int w, int h, float x, float y, float scale)
+void gfx_draw_thumb_ex(int slot, int w, int h, float x, float y, float scale, bool checker)
 {
 	if (!thumbReady || slot < 0 || slot >= GFX_THUMB_SLOTS) return;
 	int ox = (slot % 8) * 64, oy = (slot / 8) * 64;
-	gfx_draw_checker(x, y, w * scale, h * scale, 4);
+	if (checker) gfx_draw_checker(x, y, w * scale, h * scale, 4);
 	draw_tex(&thumbTex, x, y, w * scale, h * scale, (float)ox / THUMB_TEX_W, (float)oy / THUMB_TEX_H,
 	         (float)(ox + w) / THUMB_TEX_W, (float)(oy + h) / THUMB_TEX_H);
+}
+
+void gfx_draw_thumb(int slot, int w, int h, float x, float y, float scale)
+{
+	gfx_draw_thumb_ex(slot, w, h, x, y, scale, true);
 }
 
 void gfx_text(float x, float y, float scale, u32 color, const char* fmt, ...)

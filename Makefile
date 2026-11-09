@@ -12,17 +12,17 @@ include $(DEVKITARM)/3ds_rules
 #---------------------------------------------------------------------------------
 # App metadata
 #---------------------------------------------------------------------------------
-APP_TITLE       := Pixel UI Designer
-APP_DESCRIPTION := Pixel art & UI designer
+APP_TITLE       := Pixel Crow
+APP_DESCRIPTION := 3DS pixel painter
 APP_AUTHOR      := murphy97alex
 APP_PRODUCT_CODE := CTR-H-PXUI
 APP_UNIQUE_ID   := 0xC7A30
 APP_VERSION_MAJOR := 0
-APP_VERSION_MINOR := 6
-APP_VERSION_MICRO := 2
+APP_VERSION_MINOR := 7
+APP_VERSION_MICRO := 0
 
 #---------------------------------------------------------------------------------
-TARGET      := pixel-ui-designer
+TARGET      := pixel-crow
 BUILD       := build
 SOURCES     := source
 DATA        := data

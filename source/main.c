@@ -1,4 +1,4 @@
-// 3DS Pixel UI Designer
+// Pixel Crow - 3DS pixel painter
 // SPDX-License-Identifier: MIT
 
 #include <3ds.h>
@@ -21,8 +21,9 @@
 #include "text.h"
 #include "tools.h"
 
-#define APP_NAME "Pixel UI Designer"
-#define SAVE_ROOT "sdmc:/3ds/pixel-ui-designer"
+#define APP_NAME "Pixel Crow"
+#define SAVE_ROOT "sdmc:/3ds/pixel-crow"
+#define OLD_SAVE_ROOT "sdmc:/3ds/pixel-ui-designer"   // name before the rename
 #define SAVE_DIR SAVE_ROOT "/projects"
 #define STAMP_DIR SAVE_ROOT "/stamps"
 #define EXPORT_DIR SAVE_ROOT "/export"
@@ -962,7 +963,7 @@ static void run_export_doc(const Doc* d, const char* base)
 	}
 	char msg[96];
 	if (failed) snprintf(msg, sizeof(msg), "Exported %d PNG, %d failed", done, failed);
-	else if (done) snprintf(msg, sizeof(msg), "Exported %d PNG to /3ds/pixel-ui-designer/export", done);
+	else if (done) snprintf(msg, sizeof(msg), "Exported %d PNG to /3ds/pixel-crow/export", done);
 	else snprintf(msg, sizeof(msg), "No sizes ticked");
 	set_status(msg);
 }
@@ -1549,7 +1550,12 @@ typedef struct {
 	bool loaded, failed;
 } GalItem;
 
-static GalItem gal[GFX_THUMB_SLOTS];
+#define LOGO_SLOT (GFX_THUMB_SLOTS - 1)   // last thumbnail slot holds the app icon
+extern const int APP_ICON_W, APP_ICON_H;
+extern const uint32_t APP_ICON[];
+static bool logoReady;
+
+static GalItem gal[GFX_THUMB_SLOTS - 1];
 static int galCount, galSel, homeTab = 1, homeNewSel;
 static float galScroll;                 // pixels scrolled in the gallery grid
 static bool homeFromCanvas;             // B goes back to the open canvas
@@ -1581,7 +1587,7 @@ static void scan_gallery(void)
 	if (dir)
 	{
 		struct dirent* e;
-		while ((e = readdir(dir)) && galCount < GFX_THUMB_SLOTS)
+		while ((e = readdir(dir)) && galCount < GFX_THUMB_SLOTS - 1)
 		{
 			size_t n = strlen(e->d_name);
 			if (n <= 4 || n - 4 >= DOC_NAME_MAX || strcasecmp(e->d_name + n - 4, ".pxd")) continue;
@@ -1901,8 +1907,14 @@ static void draw_home_bottom(void)
 static void draw_home_top(void)
 {
 	C2D_DrawRectSolid(0, 0, 0.5f, 400, 240, C_BG_TOP);
-	gfx_text(14, 10, 0.8f, C_ACCENT, APP_NAME);
-	gfx_text(16, 34, 0.42f, C_DIM, "Pixel art & UI for Crow and other robots");
+	if (!logoReady)
+	{
+		gfx_thumb_set(LOGO_SLOT, APP_ICON, APP_ICON_W, APP_ICON_H);
+		logoReady = true;
+	}
+	gfx_draw_thumb_ex(LOGO_SLOT, APP_ICON_W, APP_ICON_H, 10, 4, 1, false);
+	gfx_text(64, 10, 0.8f, C_ACCENT, APP_NAME);
+	gfx_text(66, 34, 0.42f, C_DIM, "Pixel art & UI for Crow and other robots");
 	gfx_text(400 - 8 - gfx_text_width(0.42f, "START: exit"), 14, 0.42f, C_DIM, "START: exit");
 	float bx = 120, by = 60, bw = 260, bh = 150;
 	C2D_DrawRectSolid(bx, by, 0.5f, bw, bh, C_BG_BOT);
@@ -2763,7 +2775,7 @@ static void draw_top(void)
 	{
 		static const char* labels[128];
 		for (int i = 0; i < openCount; i++) labels[i] = openFiles[i];
-		draw_list("Open project", labels, openCount, openSel, "No projects in /3ds/pixel-ui-designer/projects");
+		draw_list("Open project", labels, openCount, openSel, "No projects in /3ds/pixel-crow/projects");
 	}
 	else if (mode == MODE_OPTIONS)
 	{
@@ -2900,7 +2912,7 @@ static void draw_top(void)
 	{
 		static const char* labels[64];
 		for (int i = 0; i < importCount; i++) labels[i] = importFiles[i];
-		draw_list("Import PNG", labels, importCount, importSel, "Put PNGs in /3ds/pixel-ui-designer/import");
+		draw_list("Import PNG", labels, importCount, importSel, "Put PNGs in /3ds/pixel-crow/import");
 	}
 	else if (mode == MODE_IMPORT_AS)
 		draw_list(importFiles[importSel], IMPORT_AS, 4, importAsSel, "");
@@ -2971,6 +2983,13 @@ int main(int argc, char* argv[])
 
 	if (!gfx_init() || !doc_new(&doc, 32, 32))
 		svcBreak(USERBREAK_PANIC);
+
+	// moved from "Pixel UI Designer": bring the old save folder along once
+	{
+		struct stat st;
+		if (stat(OLD_SAVE_ROOT, &st) == 0 && stat(SAVE_ROOT, &st) != 0)
+			rename(OLD_SAVE_ROOT, SAVE_ROOT);
+	}
 	view_fit();
 	after_doc_change();
 	export_recommended();
