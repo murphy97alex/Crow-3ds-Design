@@ -83,7 +83,7 @@ static char textStr[TEXT_MAX];
 static bool textOn;                    // floating text waiting to be placed
 static bool textMoved;
 static bool textSizing;                // dragging the resize handle
-#define TEXT_MAX_SCALE 8
+#define TEXT_MAX_SCALE 32
 #define HANDLE 14                      // resize handle size on screen (pixels)
 
 static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
@@ -288,8 +288,22 @@ static bool ask_multiline(const char* hint, char* buf, size_t n)
 	return buf[0] != 0;
 }
 
+// Biggest scale that keeps the text within 2x the largest canvas (keeps things responsive).
+static int text_scale_cap(void)
+{
+	int w, h;
+	uint8_t* p = text_render(&FONTS[textFont], textStr, 1, textSpacing, 1, 0, &w, &h);
+	if (!p) return TEXT_MAX_SCALE;
+	free(p);
+	int cap = TEXT_MAX_SCALE;
+	while (cap > 1 && (w * cap > 2 * DOC_MAX_W || h * cap > 2 * DOC_MAX_H)) cap--;
+	return cap;
+}
+
 static uint8_t* render_text(bool allowCompact, int* w, int* h)
 {
+	int cap = text_scale_cap();
+	if (textScale > cap) textScale = cap;
 	uint8_t fg = doc_color_index(&doc, curColor, allowCompact);
 	uint8_t ol = textOutline >= 0 ? doc_color_index(&doc, doc.swatches[textOutline], false) : 0;
 	return text_render(&FONTS[textFont], textStr, textScale, textSpacing, fg, ol, w, h);

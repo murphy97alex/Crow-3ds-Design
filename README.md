@@ -15,7 +15,7 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | Select tool | Mode (A): Rectangle, Magic wand (connected or all of a color), Lasso. Drag inside a selection to move it. The selection stays when you switch tools, and drawing tools then only paint inside it. Copy/paste work across projects. A = actions (copy, cut, paste, delete, flip, rotate, outline, crop canvas to selection, save as stamp); B deselects |
 | Fill tool | Mode (A): Connected area, Replace color, or Gradient: drag to fade the current color into the area with a 4x4 dither |
 | Shade tool | Paint over pixels to step them one swatch lighter (right) or darker (left); A sets direction and brush |
-| Text tool | Tap the canvas and type (multiple lines OK). Drag to move, drag the corner tab to resize (1-8x, stays crisp), tap the text to retype, B or tap outside to place. A: font (6, see [fonts](docs/FONTS.md)), size 1-8x, spacing, outline color |
+| Text tool | Tap the canvas and type (multiple lines OK). Drag to move, drag the corner tab to resize (1-32x, stays crisp), tap the text to retype, B or tap outside to place. A: font (6, see [fonts](docs/FONTS.md)), size 1-32x, spacing, outline color |
 | Stamp tool | A: pick a stamp, Size Original or Drag to size. Original: touch to place, drag to position. Drag to size: drag a box to scale it (ZR keeps proportions); a tap places it at original size |
 | Hold R + stylus | Eyedropper |
 | Hold ZR while dragging a shape | Snap: square/circle; lines to 0°, 45°, 90° and 2:1 |
