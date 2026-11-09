@@ -98,6 +98,10 @@ Stylus in right hand, frequent actions on left.
 - **v0.9.0 (v2 animator, 2026-11-09):** frames panel (X), touch frame bar, onion skin, playback
   (SELECT / bar), per-frame durations + FPS, tags, linked cels, cel-level undo, sprite sheet / PNG
   frames / animated GIF export, .pxd v4. Grid toggle moved to View.
+- **v0.9.x (2026-11-09):** sprite sheets also write a JSON data file (Aseprite array layout, for
+  game engines); export "each tag" as separate files; gallery frame-count badge.
+- **Ideas for others' needs (later):** palette import/export (.gpl, .hex), indexed PNG export,
+  LCD display export (RGB565 / C header) once Crow's display is chosen.
 - **Before sharing the repo publicly (shelved 2026-11-09):** Old 3DS support - detect New 3DS;
   on Old 3DS map redo to R+L and the ZR functions (pan, snap, free stretch, 15° rotation) to
   Select + touch or an on-screen modifier toggle; only re-composite the changed area while drawing;

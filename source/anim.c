@@ -103,6 +103,68 @@ const char* anim_export_sheet(const Doc* d, int tag, SheetLayout layout, int sca
 	return err;
 }
 
+static void json_str(FILE* f, const char* s)
+{
+	fputc('"', f);
+	for (; *s; s++)
+	{
+		unsigned char c = (unsigned char)*s;
+		if (c == '"' || c == '\\') fprintf(f, "\\%c", c);
+		else if (c < 0x20) fprintf(f, "\\u%04x", c);
+		else fputc(c, f);
+	}
+	fputc('"', f);
+}
+
+const char* anim_export_sheet_json(const Doc* d, int tag, SheetLayout layout, int scale, const char* image, const char* path)
+{
+	int from, to;
+	anim_range(d, tag, &from, &to);
+	int n = to - from + 1, cols, rows;
+	anim_sheet_grid(n, layout, &cols, &rows);
+	if (scale < 1) scale = 1;
+	int fw = d->w * scale, fh = d->h * scale;
+	FILE* f = fopen(path, "w");
+	if (!f) return "Can't open file";
+	const char* base = d->name[0] ? d->name : "untitled";
+	fprintf(f, "{ \"frames\": [\n");
+	for (int k = 0; k < n; k++)
+	{
+		char fname[DOC_NAME_MAX + 16];
+		snprintf(fname, sizeof(fname), "%s %d.pxd", base, k);
+		fprintf(f, "   { \"filename\": ");
+		json_str(f, fname);
+		fprintf(f, ",\n     \"frame\": { \"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d },\n", (k % cols) * fw, (k / cols) * fh, fw, fh);
+		fprintf(f, "     \"rotated\": false,\n     \"trimmed\": false,\n");
+		fprintf(f, "     \"spriteSourceSize\": { \"x\": 0, \"y\": 0, \"w\": %d, \"h\": %d },\n", fw, fh);
+		fprintf(f, "     \"sourceSize\": { \"w\": %d, \"h\": %d },\n", fw, fh);
+		fprintf(f, "     \"duration\": %d\n   }%s\n", doc_frame_ms(d, from + k), k + 1 < n ? "," : "");
+	}
+	fprintf(f, " ],\n \"meta\": {\n  \"app\": \"Pixel Crow\",\n  \"version\": \"1.0\",\n  \"image\": ");
+	json_str(f, image);
+	fprintf(f, ",\n  \"format\": \"RGBA8888\",\n  \"size\": { \"w\": %d, \"h\": %d },\n  \"scale\": \"%d\",\n",
+	        cols * fw, rows * fh, scale);
+	// tags inside the exported range, renumbered from 0
+	static const char* DIRS[TAG_DIR_COUNT] = { "forward", "reverse", "pingpong" };
+	fprintf(f, "  \"frameTags\": [");
+	bool firstTag = true;
+	for (int t = 0; t < d->tagCount; t++)
+	{
+		const Tag* T = &d->tags[t];
+		int a = T->from < T->to ? T->from : T->to, b = T->from < T->to ? T->to : T->from;
+		if (a < from || b > to) continue;
+		fprintf(f, "%s\n   { \"name\": ", firstTag ? "" : ",");
+		json_str(f, T->name);
+		fprintf(f, ", \"from\": %d, \"to\": %d, \"direction\": \"%s\" }", a - from, b - from, DIRS[T->dir % TAG_DIR_COUNT]);
+		firstTag = false;
+	}
+	fprintf(f, "%s],\n  \"layers\": [],\n  \"slices\": []\n }\n}\n", firstTag ? "" : "\n  ");
+	bool ok = !ferror(f);
+	ok = (fclose(f) == 0) && ok;
+	if (!ok) { remove(path); return "Write failed"; }
+	return NULL;
+}
+
 const char* anim_export_frames(const Doc* d, int tag, int scale, const char* base)
 {
 	int from, to;

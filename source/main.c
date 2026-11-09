@@ -1175,7 +1175,7 @@ static int exportSel;
 enum { EXF_PNG, EXF_SHEET, EXF_FRAMES, EXF_GIF, EXF_COUNT };
 static const char* EXF_NAMES[EXF_COUNT] = { "PNG (this frame)", "Sprite sheet PNG", "PNG per frame", "Animated GIF" };
 static const char* LAYOUT_NAMES[SHEET_LAYOUT_COUNT] = { "One row", "One column", "Grid" };
-static int exportFmt, exportTag = -1, exportLayout = SHEET_ROW;
+static int exportFmt, exportTag = -1, exportLayout = SHEET_ROW;   // exportTag: -1 all frames, -2 each tag
 
 static void export_recommended(void)
 {
@@ -1238,24 +1238,38 @@ static void run_export_doc(const Doc* d, const char* base)
 		int w, h;
 		bool even;
 		if (!exportOn[i] || !export_dims_for(d, i, &w, &h, &even)) continue;
+		// "each tag" exports one file per tag (or all frames if there are none)
+		bool each = exportTag == -2 && exportFmt != EXF_PNG && d->tagCount > 0;
+		int t0 = each ? 0 : exportTag < -1 ? -1 : exportTag, t1 = each ? d->tagCount - 1 : t0;
+		for (int tag = t0; tag <= t1; tag++)
+		{
 		char path[256], stem[DOC_NAME_MAX + TAG_NAME_MAX + 2];
 		int scale = w / d->w;
-		if (exportTag >= 0 && exportTag < d->tagCount) snprintf(stem, sizeof(stem), "%s_%s", base, d->tags[exportTag].name);
+		if (tag >= 0 && tag < d->tagCount) snprintf(stem, sizeof(stem), "%s_%s", base, d->tags[tag].name);
 		else snprintf(stem, sizeof(stem), "%s", base);
 		const char* err;
 		switch (exportFmt)
 		{
 		case EXF_SHEET:
-			snprintf(path, sizeof(path), EXPORT_DIR "/%s_sheet_%dx.png", stem, scale);
-			err = anim_export_sheet(d, exportTag, exportLayout, scale, path);
+		{
+			char img[DOC_NAME_MAX + TAG_NAME_MAX + 24];
+			snprintf(img, sizeof(img), "%s_sheet_%dx.png", stem, scale);
+			snprintf(path, sizeof(path), EXPORT_DIR "/%s", img);
+			err = anim_export_sheet(d, tag, exportLayout, scale, path);
+			if (!err)
+			{
+				snprintf(path, sizeof(path), EXPORT_DIR "/%s_sheet_%dx.json", stem, scale);
+				err = anim_export_sheet_json(d, tag, exportLayout, scale, img, path);
+			}
 			break;
+		}
 		case EXF_FRAMES:
 			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx", stem, scale);
-			err = anim_export_frames(d, exportTag, scale, path);
+			err = anim_export_frames(d, tag, scale, path);
 			break;
 		case EXF_GIF:
 			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx.gif", stem, scale);
-			err = gif_export(d, exportTag, scale, path);
+			err = gif_export(d, tag, scale, path);
 			break;
 		default:
 			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx%d.png", base, w, h);
@@ -1264,6 +1278,7 @@ static void run_export_doc(const Doc* d, const char* base)
 		}
 		if (err) failed++;
 		else done++;
+		}
 	}
 	char msg[96];
 	const char* what = exportFmt == EXF_GIF ? "GIF" : exportFmt == EXF_SHEET ? "sheet" : exportFmt == EXF_FRAMES ? "frame set" : "PNG";
@@ -1400,8 +1415,11 @@ static void update_menus(u32 kDown)
 			if (exportSel == 0) exportFmt = (exportFmt + EXF_COUNT + dir) % EXF_COUNT;
 			else if (exportSel == 1)
 			{
-				int n = doc.tagCount + 1;   // all frames, then each tag
-				exportTag = (exportTag + 1 + n + dir) % n - 1;
+				// all frames, every tag as separate files, then each single tag
+				int n = doc.tagCount ? doc.tagCount + 2 : 1;
+				int k = exportTag == -1 ? 0 : exportTag == -2 ? 1 : exportTag + 2;
+				k = (k + n + dir) % n;
+				exportTag = k == 0 ? -1 : k == 1 ? -2 : k - 2;
 			}
 			else exportLayout = (exportLayout + SHEET_LAYOUT_COUNT + dir) % SHEET_LAYOUT_COUNT;
 		}
@@ -3686,7 +3704,7 @@ static void draw_top(void)
 	{
 		C2D_DrawRectSolid(30, 8, 0.5f, 340, 224, C_PANEL);
 		gfx_rect_outline(30, 8, 340, 224, 1, C_DIM);
-		if (exportTag >= doc.tagCount) exportTag = -1;
+		if (exportTag >= doc.tagCount || (exportTag == -2 && !doc.tagCount)) exportTag = -1;
 		gfx_text(42, 14, 0.55f, C_TEXT, "Export  (frame %d of %d, %dx%d)", doc.curFrame + 1, doc.frameCount, doc.w, doc.h);
 		const int visible = 10;
 		int first = exportSel - visible + 2 < 0 ? 0 : exportSel - visible + 2;
@@ -3703,6 +3721,8 @@ static void draw_top(void)
 			{
 				gfx_text(46, y, 0.48f, exportFmt == EXF_PNG ? C_DIM : c, "Frames");
 				if (exportFmt == EXF_PNG) gfx_text(150, y, 0.48f, C_DIM, "current frame");
+				else if (exportTag == -2)
+					gfx_text(150, y, 0.48f, c, "< each tag, own files (%d) >", doc.tagCount);
 				else if (exportTag >= 0)
 					gfx_text(150, y, 0.48f, c, "< tag \"%s\" %d-%d >", doc.tags[exportTag].name, doc.tags[exportTag].from + 1,
 					         doc.tags[exportTag].to + 1);

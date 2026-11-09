@@ -133,6 +133,34 @@ int main(void)
 	free(img);
 	assert(anim_export_sheet(&d, -1, SHEET_ROW, 200, "/tmp/pc_big.png"));       // too big
 
+	// JSON data file for a sheet (Aseprite array layout)
+	strcpy(d.name, "hero");
+	assert(!anim_export_sheet_json(&d, -1, SHEET_GRID, 2, "hero_sheet_2x.png", "/tmp/pc_sheet.json"));
+	{
+		FILE* jf = fopen("/tmp/pc_sheet.json", "r");
+		static char js[8192];
+		size_t jn = fread(js, 1, sizeof(js) - 1, jf);
+		fclose(jf);
+		js[jn] = 0;
+		// 3 frames in a 2x2 grid of 10x6 cells
+		assert(strstr(js, "\"frame\": { \"x\": 10, \"y\": 0, \"w\": 10, \"h\": 6 }"));
+		assert(strstr(js, "\"frame\": { \"x\": 0, \"y\": 6, \"w\": 10, \"h\": 6 }"));
+		assert(strstr(js, "\"duration\": 300"));
+		assert(strstr(js, "\"size\": { \"w\": 20, \"h\": 12 }"));
+		assert(strstr(js, "{ \"name\": \"pp\", \"from\": 0, \"to\": 2, \"direction\": \"pingpong\" }"));
+		assert(strstr(js, "\"image\": \"hero_sheet_2x.png\""));
+	}
+	// only tags inside the range, renumbered
+	assert(!anim_export_sheet_json(&d, 1, SHEET_ROW, 1, "x.png", "/tmp/pc_tag.json"));
+	{
+		FILE* jf = fopen("/tmp/pc_tag.json", "r");
+		static char js[8192];
+		size_t jn = fread(js, 1, sizeof(js) - 1, jf);
+		fclose(jf);
+		js[jn] = 0;
+		assert(!strstr(js, "\"pp\"") && strstr(js, "\"name\": \"rev\", \"from\": 0, \"to\": 1, \"direction\": \"reverse\""));
+	}
+
 	// numbered frames
 	assert(!anim_export_frames(&d, -1, 1, "/tmp/pc_frame"));
 	assert(!import_read_png("/tmp/pc_frame_003.png", 4096, 4096, &img, &w, &h, &shrunk));

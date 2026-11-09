@@ -19,6 +19,9 @@ void anim_sheet_grid(int n, SheetLayout layout, int* cols, int* rows);
 // Each returns NULL on success, or a short error message.
 // Sprite sheet of the frames in the tag's range (in order), each scaled by `scale`.
 const char* anim_export_sheet(const Doc* d, int tag, SheetLayout layout, int scale, const char* path);
+// Data file for the sheet in Aseprite's JSON "array" layout (read by Godot, Unity, Phaser...):
+// frame rectangles, durations, tags in the range. `image` = the sheet's file name.
+const char* anim_export_sheet_json(const Doc* d, int tag, SheetLayout layout, int scale, const char* image, const char* path);
 // Numbered PNGs: `base` + "_001.png", "_002.png", ...
 const char* anim_export_frames(const Doc* d, int tag, int scale, const char* base);
 // Looping animated GIF in playback order with each frame's duration.

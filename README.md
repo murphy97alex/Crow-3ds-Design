@@ -40,13 +40,19 @@ The app opens on **Home** (also START → Home). START on Home exits the app:
 | Y | Layers (with thumbnails): up/down pick, X show/hide, left/right opacity, L/R move, A = new layer/folder, duplicate, delete, move, merge down/visible, lock, rename, collapse folder |
 | Bottom row of the palette strip | Recent colors (tap to reuse) |
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… (plays the animation when there are 2+ frames) |
-| START | Menu: Home (new / gallery), save, save as, import PNG, export (PNG, sprite sheet, PNG per frame, animated GIF; all frames or one tag), canvas size (with anchor), shift layer, Colors (ramp between swatches, adjust hue/saturation/brightness/invert), View (pixel grid, onion skin on/off, frames 1–3 each side, opacity, flip preview, 3x3 tile preview, HUD grid, isometric grid, autosave), linked swatches, exit |
+| START | Menu: Home (new / gallery), save, save as, import PNG, export (PNG, sprite sheet + JSON, PNG per frame, animated GIF; all frames, one tag, or each tag as its own files), canvas size (with anchor), shift layer, Colors (ramp between swatches, adjust hue/saturation/brightness/invert), View (pixel grid, onion skin on/off, frames 1–3 each side, opacity, flip preview, 3x3 tile preview, HUD grid, isometric grid, autosave), linked swatches, exit |
 
 Projects are saved to `/3ds/pixel-crow/projects/*.pxd` ([format](docs/PXD.md)),
 stamps to `/3ds/pixel-crow/stamps/`, PNG exports to `/3ds/pixel-crow/export/`,
 and PNGs to import go in `/3ds/pixel-crow/import/`
-(named `<project>_<W>x<H>.png`; sheets `<project>_sheet_<N>x.png`, frames `<project>_<N>x_001.png`…,
+(named `<project>_<W>x<H>.png`; sheets `<project>_sheet_<N>x.png` plus a `.json` data file, frames `<project>_<N>x_001.png`…,
 GIFs `<project>_<N>x.gif`, with the tag name added when you export one tag) — grab them with ftpd.
+
+### Sprite sheets in game engines
+Every sprite sheet comes with a `.json` file in Aseprite's "array" layout: each frame's rectangle
+and duration, plus the tags (name, first/last frame, direction). Godot, Unity, Phaser, GameMaker,
+LÖVE and most other engines have importers or plugins for it. Pick *Frames: each tag* to get one
+sheet + JSON per animation (e.g. `hero_walk_sheet_1x.png`).
 
 ## Install
 In FBI: *Remote Install → Scan QR Code*, then scan this. It always points at the
