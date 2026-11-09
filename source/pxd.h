@@ -18,5 +18,5 @@ void pxd_make_thumb(const Doc* d, uint32_t* out, int* tw, int* th);
 // Reads only the header and stored thumbnail of a project (fast, for the gallery).
 // Returns false if the file can't be read. *hasThumb is false for files saved before
 // thumbnails existed (load the whole project and use pxd_make_thumb instead).
-bool pxd_read_info(const char* path, int* w, int* h, int* layers, bool* hasThumb,
+bool pxd_read_info(const char* path, int* w, int* h, int* layers, int* frames, bool* hasThumb,
                    uint32_t* thumb, int* tw, int* th);

@@ -2317,7 +2317,7 @@ static void draw_frame_bar(void)
 typedef struct {
 	char name[DOC_NAME_MAX];
 	long mtime;
-	int w, h, layers, tw, th;
+	int w, h, layers, frames, tw, th;
 	bool loaded, failed;
 } GalItem;
 
@@ -2388,7 +2388,7 @@ static void gallery_load_some(void)
 		char path[200];
 		project_path(path, sizeof(path), g->name);
 		bool has = false;
-		if (!pxd_read_info(path, &g->w, &g->h, &g->layers, &has, thumbBuf, &g->tw, &g->th)) { g->failed = true; return; }
+		if (!pxd_read_info(path, &g->w, &g->h, &g->layers, &g->frames, &has, thumbBuf, &g->tw, &g->th)) { g->failed = true; return; }
 		if (!has)
 		{
 			// older file without a stored thumbnail: build one from the project
@@ -2650,6 +2650,15 @@ static void draw_home_bottom(void)
 			gfx_draw_thumb(i, g->tw, g->th, x + (TILE_W - g->tw) / 2, y + 3 + (64 - g->th) / 2, 1);
 		else
 			gfx_text(x + 20, y + 26, 0.45f, C_DIM, g->failed ? "error" : "...");
+		if (g->loaded && !g->failed && g->frames > 1)
+		{
+			// animation badge: frame count in the top-right corner
+			char fb[16];
+			snprintf(fb, sizeof(fb), "%df", g->frames);
+			float bw2 = gfx_text_width(0.36f, fb) + 6;
+			C2D_DrawRectSolid(x + TILE_W - 4 - bw2, y + 2, 0.5f, bw2, 11, C_ACCENT);
+			gfx_text(x + TILE_W - 1 - bw2, y + 2, 0.36f, COL(0x10, 0x10, 0x14), "%s", fb);
+		}
 		if (i == galSel) gfx_rect_outline(x + 2, y, TILE_W - 4, TILE_H - 4, 2, C_ACCENT);
 		bool rec = !strcmp(g->name, "_autosave");
 		char nm[14];
@@ -2715,6 +2724,7 @@ static void draw_home_top(void)
 	{
 		gfx_text(16, 88, 0.45f, C_DIM, "%d x %d", g->w, g->h);
 		gfx_text(16, 104, 0.45f, C_DIM, "%d layer%s", g->layers, g->layers == 1 ? "" : "s");
+		if (g->frames > 1) gfx_text(16, 120, 0.45f, C_ACCENT, "Animation: %d frames", g->frames);
 		float sc = fminf((bw - 20) / g->tw, (bh - 20) / g->th);
 		if (sc >= 1) sc = floorf(sc);
 		gfx_draw_thumb(galSel, g->tw, g->th, bx + (bw - g->tw * sc) / 2, by + (bh - g->th * sc) / 2, sc);

@@ -177,7 +177,7 @@ void pxd_make_thumb(const Doc* d, uint32_t* out, int* tw, int* th)
 	free(full);
 }
 
-bool pxd_read_info(const char* path, int* w, int* h, int* layers, bool* hasThumb,
+bool pxd_read_info(const char* path, int* w, int* h, int* layers, int* frames, bool* hasThumb,
                    uint32_t* thumb, int* tw, int* th)
 {
 	FILE* f = fopen(path, "rb");
@@ -196,6 +196,8 @@ bool pxd_read_info(const char* path, int* w, int* h, int* layers, bool* hasThumb
 			if (fread(b, 1, len, f) != len) break;
 			*w = get16(b + 2);
 			*h = get16(b + 4);
+			*frames = get16(b + 6);
+			if (*frames < 1) *frames = 1;
 			gotHead = true;
 			continue;
 		}

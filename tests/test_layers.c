@@ -135,11 +135,11 @@ int main(void)
 
 	// thumbnails: stored on save, read back without loading the project
 	{
-		int w, h, layers, tw, th, tw2, th2;
+		int w, h, layers, frames, tw, th, tw2, th2;
 		bool has;
 		static uint32_t t1[PXD_THUMB * PXD_THUMB], t2[PXD_THUMB * PXD_THUMB];
-		assert(pxd_read_info("layers.pxd", &w, &h, &layers, &has, t1, &tw, &th));
-		assert(w == 3 && h == 3 && layers == 3 && has && tw == 63 && th == 63);   // 3px * 21
+		assert(pxd_read_info("layers.pxd", &w, &h, &layers, &frames, &has, t1, &tw, &th));
+		assert(w == 3 && h == 3 && layers == 3 && frames == d.frameCount && has && tw == 63 && th == 63);   // 3px * 21
 		pxd_make_thumb(&d, t2, &tw2, &th2);
 		assert(tw2 == tw && th2 == th && !memcmp(t1, t2, tw * th * 4));
 		assert(t1[(1 * 21 + 5) * 63 + 1 * 21 + 5] == 0x123456FF);                  // centre pixel
@@ -149,7 +149,7 @@ int main(void)
 		pxd_make_thumb(&big, t2, &tw2, &th2);
 		assert(tw2 == 64 && th2 == 20);
 		doc_free(&big);
-		assert(!pxd_read_info("missing.pxd", &w, &h, &layers, &has, t1, &tw, &th));
+		assert(!pxd_read_info("missing.pxd", &w, &h, &layers, &frames, &has, t1, &tw, &th));
 	}
 
 	doc_free(&d);
