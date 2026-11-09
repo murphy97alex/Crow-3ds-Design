@@ -72,6 +72,11 @@ enum { FILL_AREA, FILL_REPLACE, FILL_GRADIENT, FILL_MODE_COUNT };
 static int fillMode;
 static const char* FILL_NAMES[FILL_MODE_COUNT] = { "Connected area", "Replace color", "Gradient (drag)" };
 static bool shadeDarker;               // Shade: false = lighter, true = darker
+static bool shadeBrightness;           // Shade: false = step to the nearest lighter/darker swatch
+static bool lineCurve;                 // Line: Curve mode (drag the line, then drag to bend it)
+static int curveStage;                 // 2 = line placed, waiting to be bent
+static bool curveBend;
+static int curveEndX, curveEndY, shapeEndX, shapeEndY;
 enum { SELMODE_RECT, SELMODE_WAND, SELMODE_LASSO, SELMODE_COUNT };
 static int selMode;
 static bool wandAll;                   // magic wand: all pixels of the color, not just connected
@@ -102,7 +107,7 @@ static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bott
 // options panel rows
 typedef enum {
 	OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR, OPT_MIRRORON, OPT_STAMP, OPT_CRISP,
-	OPT_SELOP, OPT_TOLERANCE, OPT_SAMPLE, OPT_ERASEMODE, OPT_AXISPOS,
+	OPT_SELOP, OPT_TOLERANCE, OPT_SAMPLE, OPT_ERASEMODE, OPT_AXISPOS, OPT_SHADEMODE, OPT_LINEMODE,
 	OPT_SHADEDIR, OPT_SELMODE, OPT_WANDALL, OPT_FONT, OPT_TSCALE, OPT_TSPACING, OPT_TOUTLINE,
 	// actions (A runs them)
 	OPT_ACT_FIRST, OPT_SELALL = OPT_ACT_FIRST, OPT_DESELECT, OPT_COPY, OPT_CUT, OPT_PASTE, OPT_DELETE,
@@ -374,6 +379,31 @@ static void text_apply_scale(void)
 static float canvas_sx(void);
 static float canvas_sy(void);
 
+// ---- curve line (two steps: drag the line, then drag to bend it) ----
+
+static void curve_cancel(void)
+{
+	if (!curveStage) return;
+	tools_restore();
+	hist_abort();
+	tools_set_clip(NULL);
+	curveStage = 0;
+	curveBend = false;
+	after_doc_change();
+}
+
+// Keep the line as it is now (e.g. when switching tools before bending it).
+static void curve_finish(void)
+{
+	if (!curveStage) return;
+	if (tools_changed()) { hist_commit(); doc.dirty = true; push_recent(curColor); }
+	else hist_abort();
+	tools_set_clip(NULL);
+	curveStage = 0;
+	curveBend = false;
+	after_doc_change();
+}
+
 // ---- transform handles -----------------------------------------------------------------
 // Handles 0-3: corners TL TR BR BL (resize, proportional unless ZR). 4-7: edges T R B L
 // (stretch one way). 8: rotate (dot above the top edge). Positions are unrotated offsets from
@@ -508,6 +538,7 @@ static void set_tool(Tool t)
 {
 	if (t == tool)
 		return;
+	curve_finish();
 	if (tool == TOOL_SELECT)
 		finish_floating();          // the selection itself stays, like other editors
 	if (tool == TOOL_TEXT)
@@ -573,20 +604,51 @@ static bool layer_editable(void)
 	return true;
 }
 
-// Shading: each color that is a swatch steps to the next swatch (right = lighter).
+static int luma(uint32_t c)
+{
+	return (int)(((c >> 24) & 255) * 299 + ((c >> 16) & 255) * 587 + ((c >> 8) & 255) * 114) / 1000;
+}
+
+// Shading: every color steps one shade lighter or darker.
+// Swatch mode: the closest swatch (by color) that is actually lighter/darker - works for any
+// color and any palette order, and stays within the same color family.
+// Brightness mode: the same hue with its brightness nudged up or down.
 static void build_shade_map(void)
 {
 	for (int i = 0; i < 256; i++) shadeMap[i] = i;
 	int count = doc.colorCount;
 	for (int v = 1; v <= count; v++)
-		for (int k = 0; k < DOC_PALETTE_SIZE; k++)
-			if (doc.swatches[k] == doc.colors[v])
+	{
+		uint32_t c = doc.colors[v], to = c;
+		if (shadeBrightness)
+		{
+			float h, sa, val;
+			rgba_to_hsv(c, &h, &sa, &val);
+			val += shadeDarker ? -0.12f : 0.12f;
+			if (val > 1 && !shadeDarker) { sa -= val - 1; val = 1; }   // past full brightness: wash toward white
+			val = val < 0 ? 0 : val > 1 ? 1 : val;
+			sa = sa < 0 ? 0 : sa;
+			to = hsv_to_rgba(h, sa, val);
+		}
+		else
+		{
+			int lc = luma(c);
+			long best = -1;
+			for (int k = 0; k < DOC_PALETTE_SIZE; k++)
 			{
-				int t = k + (shadeDarker ? -1 : 1);
-				if (t >= 0 && t < DOC_PALETTE_SIZE)
-					shadeMap[v] = doc_color_index(&doc, doc.swatches[t], false);
-				break;
+				uint32_t sw = doc.swatches[k];
+				int ls = luma(sw);
+				if (shadeDarker ? ls >= lc - 2 : ls <= lc + 2) continue;   // must really be lighter/darker
+				long dr = (long)((sw >> 24) & 255) - ((c >> 24) & 255);
+				long dg = (long)((sw >> 16) & 255) - ((c >> 16) & 255);
+				long db = (long)((sw >> 8) & 255) - ((c >> 8) & 255);
+				long dist = dr * dr * 3 + dg * dg * 4 + db * db * 2;
+				if (best < 0 || dist < best) { best = dist; to = sw; }
 			}
+		}
+		if (to != c)
+			shadeMap[v] = doc_color_index(&doc, to, false);
+	}
 }
 
 // ---- tool options ----------------------------------------------------------------
@@ -605,9 +667,9 @@ static int opt_rows(Tool t, OptKind* rows)
 	case TOOL_FILL:
 		rows[n++] = OPT_FILLMODE; break;
 	case TOOL_SHADE:
-		rows[n++] = OPT_SHADEDIR; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
+		rows[n++] = OPT_SHADEDIR; rows[n++] = OPT_SHADEMODE; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
 	case TOOL_LINE:
-		rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
+		rows[n++] = OPT_LINEMODE; rows[n++] = OPT_SIZE; rows[n++] = OPT_SHAPE; break;
 	case TOOL_RECT:
 	case TOOL_ELLIPSE:
 		rows[n++] = OPT_STYLE; rows[n++] = OPT_SIZE; break;
@@ -650,6 +712,8 @@ static const char* opt_label(OptKind k)
 	case OPT_MIRRORON: return "Mirror";
 	case OPT_CRISP: return "Crisp sizes";
 	case OPT_ERASEMODE: return "Mode";
+	case OPT_SHADEMODE: return "Using";
+	case OPT_LINEMODE: return "Mode";
 	case OPT_AXISPOS: return "Axis position";
 	case OPT_AXISRESET: return "Reset axis to center";
 	case OPT_SELOP: return "Combine";
@@ -694,7 +758,9 @@ static void opt_value(OptKind k, char* out, size_t n)
 	case OPT_PIXPERF: snprintf(out, n, "%s%s", b->pixelPerfect ? "On" : "Off", b->pixelPerfect && b->size > 1 ? " (size 1 only)" : ""); break;
 	case OPT_STYLE: snprintf(out, n, "%s", shapeFilled[optTool] ? "Filled" : "Outline"); break;
 	case OPT_FILLMODE: snprintf(out, n, "%s", FILL_NAMES[fillMode]); break;
-	case OPT_SHADEDIR: snprintf(out, n, "%s", shadeDarker ? "Darker (swatch to the left)" : "Lighter (swatch to the right)"); break;
+	case OPT_SHADEDIR: snprintf(out, n, "%s", shadeDarker ? "Darker" : "Lighter"); break;
+	case OPT_SHADEMODE: snprintf(out, n, "%s", shadeBrightness ? "Brightness" : "Nearest swatch"); break;
+	case OPT_LINEMODE: snprintf(out, n, "%s", lineCurve ? "Curve (drag, then bend)" : "Straight"); break;
 	case OPT_SELMODE: snprintf(out, n, "%s", SELMODE_NAMES[selMode]); break;
 	case OPT_WANDALL: snprintf(out, n, "%s", wandAll ? "All of that color" : "Connected only"); break;
 	case OPT_FONT: snprintf(out, n, "%s", FONTS[textFont].name); break;
@@ -764,6 +830,8 @@ static void opt_change(OptKind k, int dir)
 	case OPT_TOLERANCE: wandTol = wandTol + dir * 5 < 0 ? 0 : wandTol + dir * 5 > 100 ? 100 : wandTol + dir * 5; break;
 	case OPT_SAMPLE: wandSampleAll = !wandSampleAll; break;
 	case OPT_ERASEMODE: eraserLine = !eraserLine; break;
+	case OPT_SHADEMODE: shadeBrightness = !shadeBrightness; break;
+	case OPT_LINEMODE: lineCurve = !lineCurve; break;
 	default: break;
 	}
 }
@@ -888,14 +956,14 @@ static void tool_summary(Tool t, char* out, size_t n)
 	case TOOL_ERASER:
 		snprintf(out, n, "%d %s%s", b->size, SHAPE_NAMES[b->shape], eraserLine ? " line" : ""); break;
 	case TOOL_LINE:
-		snprintf(out, n, "%d %s", b->size, SHAPE_NAMES[b->shape]); break;
+		snprintf(out, n, "%d %s%s", b->size, SHAPE_NAMES[b->shape], lineCurve ? " curve" : ""); break;
 	case TOOL_RECT:
 	case TOOL_ELLIPSE:
 		if (shapeFilled[t]) snprintf(out, n, "Filled");
 		else snprintf(out, n, "Outline %d", b->size);
 		break;
 	case TOOL_FILL: snprintf(out, n, "%s", fillMode == FILL_AREA ? "Area" : fillMode == FILL_REPLACE ? "Replace" : "Gradient"); break;
-	case TOOL_SHADE: snprintf(out, n, "%s %d", shadeDarker ? "Darker" : "Lighter", b->size); break;
+	case TOOL_SHADE: snprintf(out, n, "%s %d%s", shadeDarker ? "Darker" : "Lighter", b->size, shadeBrightness ? " bright" : ""); break;
 	case TOOL_SELECT:
 		if (sel_active()) { Rect r = sel_rect(); snprintf(out, n, "%s %dx%d", SELMODE_NAMES[selMode], r.w, r.h); }
 		else snprintf(out, n, "%s", SELMODE_NAMES[selMode]);
@@ -2192,7 +2260,7 @@ static void update_shift(u32 kDown, u32 kHeld, touchPosition touch)
 
 static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 {
-	if (kDown & KEY_START) { finish_floating(); mode = MODE_MENU; menuSel = 0; return; }
+	if (kDown & KEY_START) { curve_finish(); finish_floating(); mode = MODE_MENU; menuSel = 0; return; }
 	if ((kDown & KEY_A) && touchTarget == TOUCH_NONE)
 	{
 		if (tool == TOOL_STAMP) refresh_stamps();
@@ -2205,7 +2273,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	if (kDown & KEY_X) gridOn = !gridOn;
 	if (touchTarget == TOUCH_NONE) // no tool changes mid-stroke
 	{
-		if (kDown & KEY_Y) { open_layers(); return; }
+		if (kDown & KEY_Y) { curve_finish(); open_layers(); return; }
 		if (kDown & (KEY_DUP | KEY_DDOWN))   // tool list is vertical: up/down picks the tool
 		{
 			listPos = (listPos + TOOL_COUNT + ((kDown & KEY_DDOWN) ? 1 : -1)) % TOOL_COUNT;
@@ -2225,6 +2293,11 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 
 	if (touchTarget == TOUCH_NONE)
 	{
+		if ((kDown & (KEY_L | KEY_B)) && curveStage)
+		{
+			curve_cancel();
+			kDown &= ~(KEY_L | KEY_B);
+		}
 		if (kDown & KEY_L)
 		{
 			int ow = doc.w, oh = doc.h;
@@ -2496,9 +2569,15 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			touchTarget = TOUCH_CANVAS;
 			int cx, cy;
 			screen_to_canvas(touch.px, touch.py, &cx, &cy);
+			if (curveStage && !dropper)
+				curveBend = true;                    // second step of a curve: bend it
+			else
+			{
 			startCX = cx;
 			startCY = cy;
-			if (dropper)
+			}
+			if (curveBend) {}
+			else if (dropper)
 				eyedrop(cx, cy);
 			else if (!layer_editable())
 				touchTarget = TOUCH_STRIP;           // ignore this touch
@@ -2512,6 +2591,8 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 					build_shade_map();
 					tools_set_value_map(shadeMap);
 				}
+				shapeEndX = startCX;
+				shapeEndY = startCY;
 				hist_begin(&doc);
 				tools_set_mirror_axis(mirrorAX2, mirrorAY2);
 				tools_begin(&doc, mirrorOn ? mirrorMode : MIRROR_OFF);
@@ -2532,7 +2613,13 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	{
 		int cx, cy;
 		screen_to_canvas(touch.px, touch.py, &cx, &cy);
-		if (dropper && !strokeActive)
+		if (curveBend)
+		{
+			tools_restore();
+			tools_curve(startCX, startCY, cx, cy, curveEndX, curveEndY, strokeValue, &brushes[TOOL_LINE]);
+			after_doc_change();
+		}
+		else if (dropper && !strokeActive)
 			eyedrop(cx, cy);
 		else if (strokeActive && (tool == TOOL_PENCIL || (tool == TOOL_ERASER && !eraserLine) || tool == TOOL_SHADE) && !(kDown & KEY_TOUCH))
 			tools_stroke_to(cx, cy, value, &brushes[tool]);
@@ -2560,6 +2647,8 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				{
 					if (snap) tools_snap_line(startCX, startCY, &cx, &cy);
 					tools_line(startCX, startCY, cx, cy, value, &brushes[tool]);
+					shapeEndX = cx;
+					shapeEndY = cy;
 				}
 				else
 				{
@@ -2580,6 +2669,25 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 
 	if ((kUp & KEY_TOUCH) || !(kHeld & KEY_TOUCH))
 	{
+		if (touchTarget == TOUCH_CANVAS && curveBend)
+		{
+			curveStage = 1;                          // curve_finish commits it
+			curve_finish();
+			touchTarget = TOUCH_NONE;
+			return;
+		}
+		if (touchTarget == TOUCH_CANVAS && strokeActive && tool == TOOL_LINE && lineCurve &&
+		    (shapeEndX != startCX || shapeEndY != startCY))
+		{
+			// line placed: keep it pending and wait for the bend
+			curveStage = 2;
+			curveEndX = shapeEndX;
+			curveEndY = shapeEndY;
+			strokeActive = false;
+			touchTarget = TOUCH_NONE;
+			set_status("Now drag anywhere to bend it. B cancels");
+			return;
+		}
 		if (touchTarget == TOUCH_CANVAS && strokeActive)
 		{
 			if (tools_changed())
@@ -2779,6 +2887,18 @@ static void draw_bottom(void)
 		}
 	}
 
+	// curve waiting to be bent: show its ends
+	if (curveStage == 2)
+	{
+		float pts[2][2] = { { (float)startCX, (float)startCY }, { (float)curveEndX, (float)curveEndY } };
+		for (int k = 0; k < 2; k++)
+		{
+			float px = sx + (pts[k][0] + 0.5f) * z, py = sy + (pts[k][1] + 0.5f) * z;
+			C2D_DrawCircleSolid(px, py, 0.5f, 5, C2D_Color32(0, 0, 0, 255));
+			C2D_DrawCircleSolid(px, py, 0.5f, 4, C2D_Color32(0x30, 0xD0, 0xFF, 255));
+		}
+	}
+
 	// transform box for floating pixels
 	if ((tool == TOOL_SELECT || tool == TOOL_STAMP || tool == TOOL_TEXT) && sel_floating())
 	{
@@ -2892,6 +3012,8 @@ static void draw_top_tools(void)
 	else if (tool == TOOL_STAMP)
 		gfx_text(10, 222, 0.42f, C_DIM, sel_floating() ? "Handles: size/rotate (ZR: stretch)  B / tap outside: place"
 		                                               : "Touch to place a stamp.  A: pick stamp");
+	else if (curveStage == 2)
+		gfx_text(10, 222, 0.42f, C_DIM, "Drag anywhere to bend the curve.  B / L: cancel");
 	else if (is_shape(tool))
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag to draw. Hold ZR to snap, B cancels.");
 	else

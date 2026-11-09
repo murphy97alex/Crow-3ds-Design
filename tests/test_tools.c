@@ -119,6 +119,19 @@ int main(void)
 	tools_set_clip(NULL);
 	assert(at(0, 0) == 0 && at(1, 0) == 0 && at(2, 0) == 6 && at(4, 0) == 6);
 
+	// curve: straight when bent through the midpoint; passes through the bend point; pixel-perfect
+	doc_new(&d, 21, 21);
+	tools_begin(&d, MIRROR_OFF);
+	tools_curve(0, 10, 10, 10, 20, 10, 1, &b1);
+	assert(count(1) == 21 && at(10, 10) == 1);
+	doc_new(&d, 21, 21);
+	tools_begin(&d, MIRROR_OFF);
+	tools_curve(0, 20, 10, 5, 20, 20, 1, &b1);
+	assert(at(0, 20) == 1 && at(20, 20) == 1 && at(10, 5) == 1);
+	for (int y = 0; y < 21; y++)
+		for (int x = 0; x < 21; x++)
+			if (at(x, y) && x + 1 < 21 && y + 1 < 21 && at(x + 1, y) && at(x, y + 1)) assert(0);   // no L corners
+
 	// movable mirror axis: x2 = 4 means the axis sits at x = 2.0 (between pixels 1 and 2)
 	doc_new(&d, 8, 1);
 	tools_set_mirror_axis(4, 0);

@@ -29,6 +29,9 @@ void tools_stroke_to(int x, int y, uint8_t v, const Brush* b);
 
 // Shapes (corner to corner, inclusive)
 void tools_line(int x0, int y0, int x1, int y1, uint8_t v, const Brush* b);
+// Curved line from (x0,y0) to (x1,y1) that passes through (bx,by) (a quadratic curve).
+// Size 1 is drawn pixel-perfect so curves don't get doubled corners.
+void tools_curve(int x0, int y0, int bx, int by, int x1, int y1, uint8_t v, const Brush* b);
 void tools_rect(int x0, int y0, int x1, int y1, uint8_t v, int size, bool filled);
 void tools_ellipse(int x0, int y0, int x1, int y1, uint8_t v, int size, bool filled);
 void tools_fill(int x, int y, uint8_t v, bool replaceAll);

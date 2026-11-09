@@ -173,6 +173,31 @@ void tools_line(int x0, int y0, int x1, int y1, uint8_t v, const Brush* b)
 	walk(x0, y0, x1, y1, v, b, stamp);
 }
 
+void tools_curve(int x0, int y0, int bx, int by, int x1, int y1, uint8_t v, const Brush* b)
+{
+	// control point so the curve passes through (bx, by) halfway along
+	float cx = 2 * bx - (x0 + x1) / 2.0f, cy = 2 * by - (y0 + y1) / 2.0f;
+	float len = hypotf(cx - x0, cy - y0) + hypotf(x1 - cx, y1 - cy);
+	int n = (int)(len * 2) + 2;
+	Brush bb = *b;
+	if (bb.size <= 1 && bb.shape != BRUSH_DITHER) bb.pixelPerfect = true;
+	tools_stroke_start(x0, y0, v, &bb);
+	int lx = x0, ly = y0;
+	for (int i = 1; i <= n; i++)
+	{
+		float t = (float)i / n, u = 1 - t;
+		int px = (int)lroundf(u * u * x0 + 2 * u * t * cx + t * t * x1);
+		int py = (int)lroundf(u * u * y0 + 2 * u * t * cy + t * t * y1);
+		if (i == n) { px = x1; py = y1; }
+		if (px != lx || py != ly)
+		{
+			tools_stroke_to(px, py, v, &bb);
+			lx = px;
+			ly = py;
+		}
+	}
+}
+
 static void order(int* a, int* b)
 {
 	if (*a > *b) { int t = *a; *a = *b; *b = t; }
