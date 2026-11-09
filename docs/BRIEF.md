@@ -89,6 +89,10 @@ Stylus in right hand, frequent actions on left.
   default, ZR stretch, free rotation with Scale2x/RotSprite-style resampling, crisp option); magic
   wand tolerance + sample all layers; selection Add/Subtract; invert; tap vs drag inside a selection;
   layer thumbnails; movable mirror axis; ZR+stylus pan; eraser line mode; icon background = banner navy.
+- **Before sharing the repo publicly (shelved 2026-11-09):** Old 3DS support - detect New 3DS;
+  on Old 3DS map redo to R+L and the ZR functions (pan, snap, free stretch, 15° rotation) to
+  Select + touch or an on-screen modifier toggle; only re-composite the changed area while drawing;
+  use the faster rotation for very large selections on Old 3DS. Test on real Old 3DS hardware.
 - **Next (Alex picks):**
   - **Camera mode** (filters → pixel art; shelved for now), **left-handed mode**.
   - **v2 animator** after layers.
