@@ -113,11 +113,40 @@ const char* pxd_save(const Doc* d, const char* path)
 		ok = write_chunk(f, "LAYR", lh, sizeof(lh));
 		for (int fr = 0; ok && !L->isFolder && fr < d->frameCount; fr++)
 		{
-			// FRAM payload: u16 duration_ms (0 = use fps), u8 encoding (1 = RLE), u8 reserved, data
-			buf[0] = 0; buf[1] = 0; buf[2] = 1; buf[3] = 0;
-			uint32_t len = rle_encode(L->cels[fr], n, buf + 4);
-			ok = write_chunk(f, "FRAM", buf, len + 4);
+			// FRAM payload: u16 duration_ms (0 = use fps), u8 encoding, u8 reserved, data.
+			// encoding 1 = RLE pixels; 2 = linked cel: u16 index of the earlier frame it shares.
+			put16(buf, d->frameMs[fr]);
+			buf[3] = 0;
+			int g;
+			for (g = 0; g < fr && L->cels[g] != L->cels[fr]; g++) {}
+			if (g < fr)
+			{
+				buf[2] = 2;
+				put16(buf + 4, g);
+				ok = write_chunk(f, "FRAM", buf, 6);
+			}
+			else
+			{
+				buf[2] = 1;
+				uint32_t len = rle_encode(L->cels[fr], n, buf + 4);
+				ok = write_chunk(f, "FRAM", buf, len + 4);
+			}
 		}
+	}
+	if (ok && d->tagCount)
+	{
+		// TAGS: u8 count, then per tag: u16 from, u16 to, u8 direction, name (16 bytes)
+		uint8_t tb[1 + DOC_MAX_TAGS * 21] = { 0 };
+		tb[0] = d->tagCount;
+		for (int t = 0; t < d->tagCount; t++)
+		{
+			uint8_t* q = tb + 1 + t * 21;
+			put16(q, d->tags[t].from);
+			put16(q + 2, d->tags[t].to);
+			q[4] = d->tags[t].dir;
+			memcpy(q + 5, d->tags[t].name, strnlen(d->tags[t].name, TAG_NAME_MAX));
+		}
+		ok = write_chunk(f, "TAGS", tb, 1 + d->tagCount * 21);
 	}
 	ok = ok && write_chunk(f, "END ", NULL, 0);
 	ok = (fclose(f) == 0) && ok;
@@ -194,6 +223,15 @@ bool pxd_read_info(const char* path, int* w, int* h, int* layers, bool* hasThumb
 	fclose(f);
 	return gotHead;
 }
+
+// Durations are stored with every layer's frames; read them from the first drawable layer.
+static int first_drawable(const Doc* d)
+{
+	for (int i = 0; i < d->layerCount; i++)
+		if (!d->layers[i].isFolder) return i;
+	return -1;
+}
+#define firstDrawable(nd) first_drawable(&(nd))
 
 const char* pxd_load(Doc* d, const char* path)
 {
@@ -287,13 +325,37 @@ const char* pxd_load(Doc* d, const char* path)
 				frames = 0;
 			}
 			if (nd.layers[curL].isFolder || frames >= expectFrames) { err = "Bad frame"; break; }
-			if (len < 4 || body[2] != 1) { err = "Unknown frame encoding"; break; }
+			if (len < 4 || (body[2] != 1 && body[2] != 2)) { err = "Unknown frame encoding"; break; }
+			if (curL == firstDrawable(nd)) nd.frameMs[frames] = get16(body);
+			if (body[2] == 2)
+			{
+				int g = len >= 6 ? get16(body + 4) : -1;
+				if (g < 0 || g >= frames) { err = "Bad linked frame"; break; }
+				nd.layers[curL].cels[frames] = nd.layers[curL].cels[g];
+				frames++;
+				p += 8 + len;
+				continue;
+			}
 			uint8_t* px = malloc(n);
 			if (!px) { err = "Out of memory"; break; }
 			nd.layers[curL].cels[frames++] = px;
 			if (!rle_decode(body + 4, len - 4, px, n)) { err = "Corrupt frame"; break; }
 			for (uint32_t i = 0; i < n; i++)
 				if (px[i] > nd.colorCount) px[i] = PIX_TRANSPARENT;
+		}
+		else if (!memcmp(id, "TAGS", 4) && len >= 1)
+		{
+			int cnt = body[0];
+			for (int t = 0; t < cnt && t < DOC_MAX_TAGS && 1 + (uint32_t)(t + 1) * 21 <= len; t++)
+			{
+				const uint8_t* q = body + 1 + t * 21;
+				Tag* T = &nd.tags[nd.tagCount++];
+				T->from = get16(q);
+				T->to = get16(q + 2);
+				T->dir = q[4] < TAG_DIR_COUNT ? q[4] : TAG_FORWARD;
+				memcpy(T->name, q + 5, TAG_NAME_MAX - 1);
+				T->name[TAG_NAME_MAX - 1] = 0;
+			}
 		}
 		else if (!memcmp(id, "END ", 4))
 			gotEnd = true;
@@ -320,6 +382,12 @@ const char* pxd_load(Doc* d, const char* path)
 	}
 	if (!err && drawable == 0)
 		err = "No layers";
+	for (int t = 0; !err && t < nd.tagCount; t++)
+	{
+		Tag* T = &nd.tags[t];
+		if (T->to >= expectFrames) T->to = expectFrames - 1;
+		if (T->from > T->to) T->from = T->to;
+	}
 	if (!err)
 	{
 		nd.nextLayerId = 1;

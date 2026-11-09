@@ -17,6 +17,15 @@ void gfx_draw_canvas(const Doc* d, float x, float y, float scale, float clipY0, 
 // Unclipped canvas draw for previews; flipX mirrors it left-right.
 void gfx_draw_canvas_ex(const Doc* d, float x, float y, float scale, bool flipX);
 
+// Onion skin: tinted previous (red) / next (blue) frames under the canvas in gfx_draw_canvas.
+// alpha 0..255 for the nearest frames; farther ones fade.
+void gfx_onion_rebuild(const Doc* d, int before, int after, int alpha);
+void gfx_onion_clear(void);
+
+// Playback: a separate texture holding any frame, drawn like gfx_draw_canvas_ex.
+void gfx_play_set(const Doc* d, int frame);
+void gfx_draw_play(const Doc* d, float x, float y, float scale, bool flipX);
+
 // Gallery thumbnails: up to GFX_THUMB_SLOTS images of at most 64x64 in one texture.
 #define GFX_THUMB_SLOTS 128
 void gfx_thumb_set(int slot, const uint32_t* rgba, int w, int h);

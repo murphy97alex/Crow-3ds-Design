@@ -52,7 +52,7 @@ static uint8_t before[DOC_MAX_W * DOC_MAX_H]; // frame before the current lift/p
 static void edit_begin(Doc* d)
 {
 	memcpy(before, doc_pixels(d), (size_t)d->w * d->h);
-	hist_begin(d);
+	hist_begin_cel(d);     // moves, pastes, stamps, text and shifts only touch the current cel
 }
 
 static bool frame_changed(Doc* d) { return memcmp(before, doc_pixels(d), (size_t)d->w * d->h) != 0; }

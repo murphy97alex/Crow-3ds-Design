@@ -40,13 +40,42 @@ static bool layer_alloc(Doc* d, Layer* L)
 	return true;
 }
 
+// Is frame f's buffer the same as an earlier frame's (a linked cel already counted)?
+static bool cel_dup(const Layer* L, int f)
+{
+	for (int g = 0; g < f; g++)
+		if (L->cels[g] == L->cels[f]) return true;
+	return false;
+}
+
 static void layer_free(Layer* L)
 {
 	for (int f = 0; f < DOC_MAX_FRAMES; f++)
-	{
-		free(L->cels[f]);
+		if (L->cels[f] && !cel_dup(L, f))
+			free(L->cels[f]);
+	for (int f = 0; f < DOC_MAX_FRAMES; f++)
 		L->cels[f] = NULL;
+}
+
+// Copy a layer's buffers, keeping linked cels linked. Returns false on out of memory.
+static bool cels_clone(Layer* dst, const Layer* src, size_t n)
+{
+	for (int f = 0; f < DOC_MAX_FRAMES; f++)
+	{
+		dst->cels[f] = NULL;
+		if (!src->cels[f]) continue;
+		int g;
+		for (g = 0; g < f && src->cels[g] != src->cels[f]; g++) {}
+		if (g < f) { dst->cels[f] = dst->cels[g]; continue; }
+		if (!(dst->cels[f] = malloc(n)))
+		{
+			for (int k = f; k < DOC_MAX_FRAMES; k++) dst->cels[k] = NULL;
+			layer_free(dst);
+			return false;
+		}
+		memcpy(dst->cels[f], src->cels[f], n);
 	}
+	return true;
 }
 
 bool doc_new(Doc* d, int w, int h)
@@ -61,6 +90,8 @@ bool doc_new(Doc* d, int w, int h)
 	d->colorCount = 0;
 	d->frameCount = 1;
 	d->curFrame = 0;
+	memset(d->frameMs, 0, sizeof(d->frameMs));
+	d->tagCount = 0;
 	d->nextLayerId = 1;
 	d->layerCount = 1;
 	d->curLayer = 0;
@@ -96,10 +127,11 @@ static long color_dist(uint32_t a, uint32_t b)
 }
 
 // Calls fn on every pixel buffer of the document.
+// Every pixel buffer once (linked cels are visited only the first time).
 #define FOR_EACH_CEL(d, cel)                                              \
 	for (int _l = 0; _l < (d)->layerCount; _l++)                          \
 		for (int _f = 0; _f < (d)->frameCount; _f++)                      \
-			for (uint8_t* cel = (d)->layers[_l].cels[_f]; cel; cel = NULL)
+			for (uint8_t* cel = cel_dup(&(d)->layers[_l], _f) ? NULL : (d)->layers[_l].cels[_f]; cel; cel = NULL)
 
 void doc_compact(Doc* d)
 {
@@ -296,13 +328,7 @@ int doc_layer_duplicate(Doc* d, int i)
 	char nm[LAYER_NAME_MAX];
 	snprintf(nm, sizeof(nm), "%.10s copy", d->layers[i].name);
 	memcpy(L.name, nm, sizeof(nm));
-	memset(L.cels, 0, sizeof(L.cels));
-	size_t n = (size_t)d->w * d->h;
-	for (int f = 0; f < d->frameCount; f++)
-	{
-		if (!(L.cels[f] = malloc(n))) { layer_free(&L); return -1; }
-		memcpy(L.cels[f], d->layers[i].cels[f], n);
-	}
+	if (!cels_clone(&L, &d->layers[i], (size_t)d->w * d->h)) return -1;
 	insert_at(d, i + 1, &L);
 	d->curLayer = i + 1;
 	return i + 1;
@@ -449,6 +475,8 @@ bool doc_layer_merge_down(Doc* d, int i)
 	int a = d->layers[i].opacity;
 	size_t n = (size_t)d->w * d->h;
 	for (int f = 0; f < d->frameCount; f++)
+		if (!doc_cel_unlink(d, j, f)) return false;   // each frame of the result is its own drawing
+	for (int f = 0; f < d->frameCount; f++)
 	{
 		uint8_t *src = d->layers[i].cels[f], *dst = d->layers[j].cels[f];
 		for (size_t k = 0; k < n; k++)
@@ -478,6 +506,8 @@ bool doc_merge_visible(Doc* d)
 		return false;
 	doc_compact(d);
 	size_t n = (size_t)d->w * d->h;
+	for (int f = 0; f < d->frameCount; f++)
+		if (!doc_cel_unlink(d, target, f)) return false;
 	uint32_t* rgba = malloc(n * 4);
 	if (!rgba) return false;
 	for (int f = 0; f < d->frameCount; f++)
@@ -529,6 +559,138 @@ void doc_composite(const Doc* d, int frame, uint32_t* out)
 	}
 }
 
+// ---- frames ----------------------------------------------------------------------
+
+int doc_frame_ms(const Doc* d, int f)
+{
+	if (d->frameMs[f]) return d->frameMs[f];
+	return 1000 / (d->fps ? d->fps : 8);
+}
+
+size_t doc_pixel_bytes(const Doc* d)
+{
+	size_t n = 0;
+	FOR_EACH_CEL(d, cel) n += (size_t)d->w * d->h;
+	return n;
+}
+
+bool doc_frame_insert(Doc* d, int at, int copyFrom)
+{
+	if (d->frameCount >= DOC_MAX_FRAMES || at < 0 || at > d->frameCount) return false;
+	size_t n = (size_t)d->w * d->h;
+	uint8_t* fresh[DOC_MAX_LAYERS] = { 0 };
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		if (d->layers[i].isFolder) continue;
+		fresh[i] = copyFrom >= 0 ? malloc(n) : calloc(n, 1);
+		if (!fresh[i]) { for (int k = 0; k < i; k++) free(fresh[k]); return false; }
+		if (copyFrom >= 0) memcpy(fresh[i], d->layers[i].cels[copyFrom], n);
+	}
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		Layer* L = &d->layers[i];
+		if (L->isFolder) continue;
+		memmove(&L->cels[at + 1], &L->cels[at], sizeof(uint8_t*) * (d->frameCount - at));
+		L->cels[at] = fresh[i];
+	}
+	memmove(&d->frameMs[at + 1], &d->frameMs[at], sizeof(uint16_t) * (d->frameCount - at));
+	d->frameMs[at] = copyFrom >= 0 ? d->frameMs[copyFrom < at ? copyFrom : copyFrom + 1] : 0;
+	for (int t = 0; t < d->tagCount; t++)
+	{
+		if (d->tags[t].from >= at) d->tags[t].from++;
+		if (d->tags[t].to >= at) d->tags[t].to++;
+		else if (d->tags[t].to + 1 == at && at > d->tags[t].from) d->tags[t].to++;   // growing a tag at its end
+	}
+	d->frameCount++;
+	d->curFrame = at;
+	return true;
+}
+
+bool doc_frame_delete(Doc* d, int f)
+{
+	if (d->frameCount <= 1 || f < 0 || f >= d->frameCount) return false;
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		Layer* L = &d->layers[i];
+		if (L->isFolder) continue;
+		bool shared = false;
+		for (int g = 0; g < d->frameCount; g++)
+			if (g != f && L->cels[g] == L->cels[f]) shared = true;
+		if (!shared) free(L->cels[f]);
+		memmove(&L->cels[f], &L->cels[f + 1], sizeof(uint8_t*) * (d->frameCount - f - 1));
+		L->cels[d->frameCount - 1] = NULL;
+	}
+	memmove(&d->frameMs[f], &d->frameMs[f + 1], sizeof(uint16_t) * (d->frameCount - f - 1));
+	d->frameMs[d->frameCount - 1] = 0;
+	d->frameCount--;
+	for (int t = 0; t < d->tagCount; t++)
+	{
+		Tag* T = &d->tags[t];
+		if (T->from == f && T->to == f)
+		{
+			// the tag's only frame is gone: remove the tag
+			memmove(T, T + 1, sizeof(Tag) * (d->tagCount - t - 1));
+			d->tagCount--;
+			t--;
+			continue;
+		}
+		if (T->from > f) T->from--;
+		if (T->to >= f) T->to--;
+	}
+	if (d->curFrame >= d->frameCount) d->curFrame = d->frameCount - 1;
+	return true;
+}
+
+bool doc_frame_move(Doc* d, int f, int dir)
+{
+	int g = f + dir;
+	if (g < 0 || g >= d->frameCount || f < 0 || f >= d->frameCount) return false;
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		Layer* L = &d->layers[i];
+		if (L->isFolder) continue;
+		uint8_t* t = L->cels[f];
+		L->cels[f] = L->cels[g];
+		L->cels[g] = t;
+	}
+	uint16_t ms = d->frameMs[f];
+	d->frameMs[f] = d->frameMs[g];
+	d->frameMs[g] = ms;
+	if (d->curFrame == f) d->curFrame = g;
+	return true;
+}
+
+bool doc_cel_linked(const Doc* d, int li, int f)
+{
+	const Layer* L = &d->layers[li];
+	if (L->isFolder) return false;
+	for (int g = 0; g < d->frameCount; g++)
+		if (g != f && L->cels[g] == L->cels[f]) return true;
+	return false;
+}
+
+bool doc_cel_link_prev(Doc* d, int li, int f)
+{
+	Layer* L = &d->layers[li];
+	if (L->isFolder || f <= 0 || f >= d->frameCount || L->cels[f] == L->cels[f - 1]) return false;
+	if (!doc_cel_linked(d, li, f)) free(L->cels[f]);
+	L->cels[f] = L->cels[f - 1];
+	return true;
+}
+
+bool doc_cel_unlink(Doc* d, int li, int f)
+{
+	Layer* L = &d->layers[li];
+	if (L->isFolder) return false;
+	if (!doc_cel_linked(d, li, f)) return true;
+	size_t n = (size_t)d->w * d->h;
+	uint8_t* c = malloc(n);
+	if (!c) return false;
+	memcpy(c, L->cels[f], n);
+	L->cels[f] = c;
+	return true;
+}
+
 // ---- canvas ----------------------------------------------------------------------
 
 // New size; old pixel (x, y) moves to (x + ox, y + oy).
@@ -542,6 +704,7 @@ static bool reframe(Doc* d, int w, int h, int ox, int oy)
 		if (L->isFolder) continue;
 		for (int f = 0; f < d->frameCount; f++)
 		{
+			if (cel_dup(L, f)) continue;   // linked: already moved to the new buffer below
 			uint8_t* nb = calloc((size_t)w * h, 1);
 			if (!nb) return false;
 			for (int y = 0; y < d->h; y++)
@@ -555,8 +718,10 @@ static bool reframe(Doc* d, int w, int h, int ox, int oy)
 						nb[ny * w + nx] = L->cels[f][y * d->w + x];
 				}
 			}
-			free(L->cels[f]);
-			L->cels[f] = nb;
+			uint8_t* old = L->cels[f];
+			for (int g = f; g < d->frameCount; g++)   // every frame sharing this drawing
+				if (L->cels[g] == old) L->cels[g] = nb;
+			free(old);
 		}
 	}
 	d->w = w;
@@ -580,7 +745,10 @@ bool doc_crop(Doc* d, int x, int y, int w, int h)
 #define HIST_BUDGET (12u * 1024 * 1024)   // bytes of pixel data kept for undo/redo
 
 typedef struct {
-	Doc* doc;     // deep copy (swatches, name and dirty flag are ignored on restore)
+	Doc* doc;      // whole-document deep copy (swatches, name and dirty flag ignored on restore)
+	uint8_t* cel;  // or: one cel's pixels, with the color table they refer to
+	uint32_t* colors;
+	int colorCount, layerId, frame;
 	size_t bytes;
 } Snap;
 
@@ -592,50 +760,89 @@ static bool hasPending;
 
 static void snap_free(Snap* s)
 {
-	if (!s->doc) return;
-	doc_free(s->doc);
-	free(s->doc);
+	if (s->doc)
+	{
+		doc_free(s->doc);
+		free(s->doc);
+	}
+	free(s->cel);
+	free(s->colors);
 	s->doc = NULL;
+	s->cel = NULL;
+	s->colors = NULL;
 	histBytes -= s->bytes;
 	s->bytes = 0;
 }
 
+static bool snap_take_cel(Snap* s, const Doc* d, int layerId, int frame)
+{
+	memset(s, 0, sizeof(*s));
+	int li = doc_layer_index(d, layerId);
+	if (li < 0 || d->layers[li].isFolder || frame >= d->frameCount) return false;
+	size_t n = (size_t)d->w * d->h;
+	s->cel = malloc(n);
+	s->colors = malloc(sizeof(uint32_t) * (DOC_MAX_COLORS + 1));
+	if (!s->cel || !s->colors) { free(s->cel); free(s->colors); s->cel = NULL; s->colors = NULL; return false; }
+	memcpy(s->cel, d->layers[li].cels[frame], n);
+	memcpy(s->colors, d->colors, sizeof(uint32_t) * (DOC_MAX_COLORS + 1));
+	s->colorCount = d->colorCount;
+	s->layerId = layerId;
+	s->frame = frame;
+	s->bytes = n;
+	histBytes += n;
+	return true;
+}
+
+// Put a cel snapshot back. Its pixel values are translated through its own color table, so
+// it stays right even if the document's color table was compacted since.
+static void snap_restore_cel(Snap* s, Doc* d)
+{
+	int li = doc_layer_index(d, s->layerId);
+	if (li >= 0 && !d->layers[li].isFolder && s->frame < d->frameCount)
+	{
+		int16_t map[DOC_MAX_COLORS + 1];
+		for (int v = 0; v <= DOC_MAX_COLORS; v++) map[v] = -1;
+		map[0] = 0;
+		uint8_t* dst = d->layers[li].cels[s->frame];
+		size_t n = (size_t)d->w * d->h;
+		for (size_t i = 0; i < n; i++)
+		{
+			uint8_t v = s->cel[i];
+			if (map[v] < 0) map[v] = v > s->colorCount ? 0 : doc_color_index(d, s->colors[v], false);
+			dst[i] = map[v];
+		}
+		d->curLayer = li;
+		d->curFrame = s->frame;
+	}
+	snap_free(s);
+}
+
 static bool snap_take(Snap* s, const Doc* d)
 {
+	memset(s, 0, sizeof(*s));
 	Doc* c = malloc(sizeof(Doc));
 	if (!c) return false;
 	*c = *d;
-	size_t n = (size_t)d->w * d->h, bytes = 0;
-	for (int i = 0; i < c->layerCount; i++)
-	{
-		Layer* L = &c->layers[i];
-		for (int f = 0; f < DOC_MAX_FRAMES; f++)
-		{
-			if (!d->layers[i].cels[f]) { L->cels[f] = NULL; continue; }
-			L->cels[f] = malloc(n);
-			if (!L->cels[f])
-			{
-				for (int k = f; k < DOC_MAX_FRAMES; k++) L->cels[k] = NULL;
-				for (int k = i + 1; k < DOC_MAX_LAYERS; k++) memset(c->layers[k].cels, 0, sizeof(c->layers[k].cels));
-				doc_free(c);
-				free(c);
-				return false;
-			}
-			memcpy(L->cels[f], d->layers[i].cels[f], n);
-			bytes += n;
-		}
-	}
-	for (int i = c->layerCount; i < DOC_MAX_LAYERS; i++)
+	size_t n = (size_t)d->w * d->h;
+	for (int i = 0; i < DOC_MAX_LAYERS; i++)
 		memset(c->layers[i].cels, 0, sizeof(c->layers[i].cels));
+	for (int i = 0; i < c->layerCount; i++)
+		if (!cels_clone(&c->layers[i], &d->layers[i], n))
+		{
+			doc_free(c);
+			free(c);
+			return false;
+		}
 	s->doc = c;
-	s->bytes = bytes;
-	histBytes += bytes;
+	s->bytes = doc_pixel_bytes(c);
+	histBytes += s->bytes;
 	return true;
 }
 
 // Restore the document from a snapshot (consumes the snapshot's pixel buffers).
 static void snap_restore(Snap* s, Doc* d)
 {
+	if (!s->doc) { snap_restore_cel(s, d); return; }
 	Doc* c = s->doc;
 	uint32_t sw[DOC_PALETTE_SIZE];
 	char name[DOC_NAME_MAX];
@@ -694,6 +901,13 @@ void hist_clear(void)
 	stack_clear(redoStack, &redoCount);
 }
 
+void hist_begin_cel(const Doc* d)
+{
+	hist_abort();
+	hasPending = snap_take_cel(&pending, d, d->layers[d->curLayer].id, d->curFrame);
+	if (!hasPending) hasPending = snap_take(&pending, d);
+}
+
 void hist_begin(const Doc* d)
 {
 	hist_abort();
@@ -706,7 +920,7 @@ void hist_commit(void)
 		return;
 	stack_clear(redoStack, &redoCount);
 	stack_push(undoStack, &undoCount, pending);
-	pending.doc = NULL;
+	memset(&pending, 0, sizeof(pending));
 	hasPending = false;
 }
 
@@ -721,7 +935,8 @@ static bool hist_move(Doc* d, Snap* from, int* nFrom, Snap* to, int* nTo)
 	if (*nFrom == 0)
 		return false;
 	Snap cur;
-	if (!snap_take(&cur, d))
+	Snap* top = &from[*nFrom - 1];
+	if (!(top->doc ? snap_take(&cur, d) : snap_take_cel(&cur, d, top->layerId, top->frame)))
 		return false;
 	Snap s = from[--(*nFrom)];
 	snap_restore(&s, d);

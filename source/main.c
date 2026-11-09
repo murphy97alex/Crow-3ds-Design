@@ -1633,7 +1633,7 @@ static void adjust_begin(void)
 	if (!adjOrig) { mode = MODE_DRAW; return; }
 	memcpy(adjOrig, doc_pixels(&doc), n);
 	adjCount = doc.colorCount;
-	hist_begin(&doc);
+	hist_begin_cel(&doc);
 	adjSel = adjHue = adjSat = adjBri = 0;
 	adjInvert = false;
 	mode = MODE_ADJUST;
@@ -2593,7 +2593,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				}
 				shapeEndX = startCX;
 				shapeEndY = startCY;
-				hist_begin(&doc);
+				hist_begin_cel(&doc);             // strokes only touch this layer's current frame
 				tools_set_mirror_axis(mirrorAX2, mirrorAY2);
 				tools_begin(&doc, mirrorOn ? mirrorMode : MIRROR_OFF);
 				tools_set_clip(sel_active() ? sel_contains : NULL);   // paint inside the selection only

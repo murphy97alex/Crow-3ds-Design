@@ -21,19 +21,43 @@ static bool chunk(FILE* f, const char* type, const uint8_t* data, uint32_t len)
 
 const char* png_export(const Doc* d, int frame, int outW, int outH, const char* path)
 {
-	if (outW < 1 || outH < 1 || outW > PNG_MAX_DIM || outH > PNG_MAX_DIM)
-		return "Bad size";
 	uint32_t* src = malloc((size_t)d->w * d->h * 4);
 	if (!src) return "Out of memory";
 	doc_composite(d, frame, src);
+	const char* err = pngx_write_rgba(src, d->w, d->h, outW, outH, path);
+	free(src);
+	return err;
+}
+
+typedef struct { const uint32_t* src; int sw, sh, outW, outH; } ScaleCtx;
+
+static void scale_row(void* ctx, int y, uint32_t* row)
+{
+	const ScaleCtx* c = ctx;
+	int sy = (int)((long)y * c->sh / c->outH);
+	for (int x = 0; x < c->outW; x++)
+		row[x] = c->src[sy * c->sw + (int)((long)x * c->sw / c->outW)];
+}
+
+const char* pngx_write_rgba(const uint32_t* src, int sw, int sh, int outW, int outH, const char* path)
+{
+	ScaleCtx c = { src, sw, sh, outW, outH };
+	return pngx_write_rows(outW, outH, scale_row, &c, path);
+}
+
+const char* pngx_write_rows(int outW, int outH, PngxRowFn rowFn, void* ctx, const char* path)
+{
+	if (outW < 1 || outH < 1 || outW > PNG_MAX_DIM || outH > PNG_MAX_DIM)
+		return "Too big";
 	size_t rowLen = (size_t)outW * 4 + 1;
 	uint8_t* row = malloc(rowLen);
+	uint32_t* px = malloc((size_t)outW * 4);
 	enum { OUT_CHUNK = 64 * 1024 };
 	uint8_t* out = malloc(OUT_CHUNK);
-	if (!row || !out) { free(row); free(out); free(src); return "Out of memory"; }
+	if (!row || !out || !px) { free(row); free(out); free(px); return "Out of memory"; }
 
 	FILE* f = fopen(path, "wb");
-	if (!f) { free(row); free(out); free(src); return "Can't open file"; }
+	if (!f) { free(row); free(out); free(px); return "Can't open file"; }
 
 	static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
 	uint8_t ihdr[13];
@@ -54,12 +78,11 @@ const char* png_export(const Doc* d, int frame, int outW, int outH, const char* 
 		bool last = y == outH;
 		if (!last)
 		{
-			int sy = (int)((long)y * d->h / outH);
+			rowFn(ctx, y, px);
 			row[0] = 0; // filter: none
 			for (int x = 0; x < outW; x++)
 			{
-				int sx = (int)((long)x * d->w / outW);
-				uint32_t c = src[sy * d->w + sx];
+				uint32_t c = px[x];
 				uint8_t* p = row + 1 + x * 4;
 				p[0] = c >> 24; p[1] = c >> 16; p[2] = c >> 8; p[3] = c;
 			}
@@ -83,7 +106,7 @@ const char* png_export(const Doc* d, int frame, int outW, int outH, const char* 
 	ok = (fclose(f) == 0) && ok;
 	free(row);
 	free(out);
-	free(src);
+	free(px);
 	if (!ok) { remove(path); return "Write failed"; }
 	return NULL;
 }

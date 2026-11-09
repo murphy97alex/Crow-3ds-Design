@@ -212,7 +212,7 @@ int main(void)
 
 	// shift with wrap
 	doc_new(&d, 4, 3); sel_reset();
-	doc_pixels(&d)[0] = 1;
+	doc_pixels(&d)[0] = doc_color_index(&d, 0x445566FF, true);   // value 1
 	shift_begin(&d); shift_set(&d, -1, 4); shift_end(&d, true);
 	assert(at(3, 1) == 1 && count(1) == 1);
 	assert(hist_undo(&d) && at(0, 0) == 1);

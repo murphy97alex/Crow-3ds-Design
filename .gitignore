@@ -38,3 +38,4 @@ test_layers
 test_import
 big.png
 test_text
+frames.pxd

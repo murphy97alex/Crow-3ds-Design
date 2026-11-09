@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define DOC_MAX_W 320
@@ -13,6 +14,16 @@
 #define DOC_MAX_LAYERS 16     // layers + folders
 #define DOC_NAME_MAX 48
 #define LAYER_NAME_MAX 16
+#define DOC_MAX_TAGS 16
+#define TAG_NAME_MAX 16
+
+// Animation tag: a named range of frames that plays forward, reverse or ping-pong.
+typedef enum { TAG_FORWARD, TAG_REVERSE, TAG_PINGPONG, TAG_DIR_COUNT } TagDir;
+typedef struct {
+	char name[TAG_NAME_MAX];
+	uint8_t from, to;    // frame indices, inclusive
+	uint8_t dir;         // TagDir
+} Tag;
 
 // Pixel values: 0 = transparent, 1..colorCount = colors[value].
 // Swatches are just saved colors (like Photoshop/Clip Studio): editing one never changes the art.
@@ -26,7 +37,8 @@ typedef struct {
 	int folder;                     // id of the containing folder, or -1
 	bool isFolder, visible, locked, collapsed;
 	uint8_t opacity;                // 0..255
-	uint8_t* cels[DOC_MAX_FRAMES];  // one pixel buffer per frame; NULL for folders
+	uint8_t* cels[DOC_MAX_FRAMES];  // one pixel buffer per frame; NULL for folders. Linked cels:
+	                                // several frames point at the same buffer (one drawing).
 } Layer;
 
 typedef struct {
@@ -36,6 +48,9 @@ typedef struct {
 	uint32_t colors[DOC_MAX_COLORS + 1];  // color table for pixel values; [0] unused
 	int colorCount;
 	int frameCount, curFrame;
+	uint16_t frameMs[DOC_MAX_FRAMES];     // per-frame duration in ms; 0 = 1000 / fps
+	Tag tags[DOC_MAX_TAGS];
+	int tagCount;
 	Layer layers[DOC_MAX_LAYERS];
 	int layerCount, curLayer;             // curLayer is always a drawable (non-folder) layer
 	int nextLayerId;
@@ -91,6 +106,19 @@ void doc_set_current_layer(Doc* d, int i);            // ignores folders
 // Composite visible layers of a frame into RGBA (0xRRGGBBAA, straight alpha).
 void doc_composite(const Doc* d, int frame, uint32_t* out);
 
+// ---- frames ---------------------------------------------------------------------
+
+int doc_frame_ms(const Doc* d, int f);                  // duration of frame f in ms
+size_t doc_pixel_bytes(const Doc* d);                   // memory used by all pixel buffers
+// Insert a frame at index `at`: blank (copyFrom < 0) or a copy of frame copyFrom. Becomes current.
+bool doc_frame_insert(Doc* d, int at, int copyFrom);
+bool doc_frame_delete(Doc* d, int f);                   // keeps at least one frame
+bool doc_frame_move(Doc* d, int f, int dir);            // swap with the neighbour (-1 / +1)
+// Linked cels: frame f of layer li shows the same drawing as frame f-1 (editing one edits both).
+bool doc_cel_link_prev(Doc* d, int li, int f);
+bool doc_cel_unlink(Doc* d, int li, int f);             // give frame f its own copy
+bool doc_cel_linked(const Doc* d, int li, int f);       // shared with any other frame?
+
 // ---- canvas ---------------------------------------------------------------------
 
 // New size; ax/ay = anchor 0 (left/top), 1 (center), 2 (right/bottom).
@@ -103,6 +131,8 @@ void hist_clear(void);
 void hist_push(const Doc* d);     // call before an edit; clears redo
 // For strokes: snapshot at stroke start, commit only if something changed.
 void hist_begin(const Doc* d);
+// Cheaper snapshot for edits that only touch the current layer's current cel (strokes, moves).
+void hist_begin_cel(const Doc* d);
 void hist_commit(void);
 void hist_abort(void);
 bool hist_undo(Doc* d);

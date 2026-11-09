@@ -3,7 +3,7 @@
 #pragma once
 #include "doc.h"
 
-#define PXD_VERSION 3
+#define PXD_VERSION 4
 
 // Returns NULL on success, or a short error message.
 const char* pxd_save(const Doc* d, const char* path);
