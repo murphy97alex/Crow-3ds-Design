@@ -113,8 +113,9 @@ static int listPos;    // D-pad cursor in the tool list (Mirror is a settings en
 typedef enum {
 	MODE_DRAW, MODE_MENU, MODE_NEW, MODE_OPEN, MODE_CONFIRM, MODE_PICKER, MODE_OPTIONS, MODE_EXPORT, MODE_SHIFT,
 	MODE_LAYERS, MODE_LAYER_ACT, MODE_ANCHOR, MODE_IMPORT, MODE_IMPORT_AS, MODE_COLORS, MODE_RAMP, MODE_ADJUST, MODE_VIEW,
+	MODE_HOME,
 } Mode;
-typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE, ACT_IMPORT_PROJECT } Action;
+typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE, ACT_IMPORT_PROJECT, ACT_DELETE_GAL } Action;
 
 static Doc doc;
 static Mode mode = MODE_DRAW;
@@ -153,6 +154,7 @@ static int shiftX, shiftY, shiftLastCX, shiftLastCY;
 static int menuSel, newSel, openSel, openCount;
 static char openFiles[128][DOC_NAME_MAX + 8];
 static Action confirmAction;
+static Mode confirmBack = MODE_MENU;   // where B in a confirm box goes
 static char confirmMsg[96];
 static int pendingNewW, pendingNewH;
 static char pendingName[DOC_NAME_MAX];
@@ -184,6 +186,8 @@ static unsigned autosaveFrames;
 
 static void scan_imports(void);
 static void import_as(int how);
+static void open_home(bool fromCanvas);
+static void gallery_delete(void);
 
 static void set_status(const char* msg)
 {
@@ -777,6 +781,7 @@ static void confirm(Action a, const char* msg)
 {
 	confirmAction = a;
 	snprintf(confirmMsg, sizeof(confirmMsg), "%s", msg);
+	confirmBack = mode == MODE_HOME ? MODE_HOME : MODE_MENU;
 	mode = MODE_CONFIRM;
 }
 
@@ -826,27 +831,6 @@ static void save_as(void)
 	mode = MODE_DRAW;
 }
 
-static void scan_projects(void)
-{
-	openCount = 0;
-	DIR* dir = opendir(SAVE_DIR);
-	if (!dir)
-		return;
-	struct dirent* e;
-	while ((e = readdir(dir)) && openCount < 128)
-	{
-		size_t n = strlen(e->d_name);
-		if (n > 4 && n - 4 < DOC_NAME_MAX && !strcasecmp(e->d_name + n - 4, ".pxd"))
-		{
-			memcpy(openFiles[openCount], e->d_name, n - 4);
-			openFiles[openCount][n - 4] = '\0';
-			openCount++;
-		}
-	}
-	closedir(dir);
-	qsort(openFiles, openCount, sizeof(openFiles[0]), (int (*)(const void*, const void*))strcasecmp);
-}
-
 static void open_project(const char* name)
 {
 	char path[160];
@@ -893,17 +877,19 @@ static void run_action(Action a)
 	case ACT_EXIT: remove(AUTOSAVE_PATH); running = false; break;
 	case ACT_OVERWRITE: save_as_name(pendingName); break;
 	case ACT_IMPORT_PROJECT: import_as(0); break;
+	case ACT_DELETE_GAL: gallery_delete(); break;
 	default: break;
 	}
 }
 
 // ---- menus ---------------------------------------------------------------------
 
-static const char* MENU_ITEMS[] = { "Back to canvas", "New canvas", "Save", "Save as...", "Open...",
-                                    "Import PNG...", "Export PNG...", "Canvas size...", "Shift layer (wrap)...",
-                                    "Colors...", "View...", "Linked swatches", "Exit" };
-#define MENU_COUNT 13
-#define MENU_LINKED 11
+enum { MI_BACK, MI_HOME, MI_SAVE, MI_SAVEAS, MI_IMPORT, MI_EXPORT, MI_SIZE, MI_SHIFT, MI_COLORS, MI_VIEW,
+       MI_LINKED, MI_EXIT, MENU_COUNT };
+static const char* MENU_ITEMS[MENU_COUNT] = { "Back to canvas", "Home (new / gallery)", "Save", "Save as...",
+                                              "Import PNG...", "Export PNG...", "Canvas size...", "Shift layer (wrap)...",
+                                              "Colors...", "View...", "Linked swatches", "Exit" };
+#define MENU_LINKED MI_LINKED
 
 // ---- PNG export ------------------------------------------------------------------
 
@@ -937,20 +923,20 @@ static bool export_is_recommended(void)
 }
 
 // Output size for an entry; returns false if too big. *even = whole-number scale.
-static bool export_dims(int i, int* w, int* h, bool* even)
+static bool export_dims_for(const Doc* d, int i, int* w, int* h, bool* even)
 {
 	const ExportSize* e = &EXPORT_SIZES[i];
 	if (e->mult)
 	{
-		*w = doc.w * e->mult;
-		*h = doc.h * e->mult;
+		*w = d->w * e->mult;
+		*h = d->h * e->mult;
 		*even = true;
 	}
 	else
 	{
-		int longest = doc.w > doc.h ? doc.w : doc.h;
-		*w = (doc.w * e->fixed + longest / 2) / longest;
-		*h = (doc.h * e->fixed + longest / 2) / longest;
+		int longest = d->w > d->h ? d->w : d->h;
+		*w = (d->w * e->fixed + longest / 2) / longest;
+		*h = (d->h * e->fixed + longest / 2) / longest;
 		if (*w < 1) *w = 1;
 		if (*h < 1) *h = 1;
 		*even = e->fixed % longest == 0;
@@ -958,19 +944,20 @@ static bool export_dims(int i, int* w, int* h, bool* even)
 	return *w <= PNG_MAX_DIM && *h <= PNG_MAX_DIM;
 }
 
-static void run_export(void)
+static bool export_dims(int i, int* w, int* h, bool* even) { return export_dims_for(&doc, i, w, h, even); }
+
+static void run_export_doc(const Doc* d, const char* base)
 {
 	ensure_dirs();
-	const char* base = doc.name[0] ? doc.name : "untitled";
 	int done = 0, failed = 0;
 	for (int i = 0; i < EXPORT_SIZE_COUNT; i++)
 	{
 		int w, h;
 		bool even;
-		if (!exportOn[i] || !export_dims(i, &w, &h, &even)) continue;
+		if (!exportOn[i] || !export_dims_for(d, i, &w, &h, &even)) continue;
 		char path[200];
 		snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx%d.png", base, w, h);
-		if (png_export(&doc, doc.curFrame, w, h, path)) failed++;
+		if (png_export(d, d->curFrame, w, h, path)) failed++;
 		else done++;
 	}
 	char msg[96];
@@ -979,6 +966,8 @@ static void run_export(void)
 	else snprintf(msg, sizeof(msg), "No sizes ticked");
 	set_status(msg);
 }
+
+static void run_export(void) { run_export_doc(&doc, doc.name[0] ? doc.name : "untitled"); }
 
 typedef struct { const char* label; int w, h; } Preset;
 static const Preset PRESETS[] = {
@@ -1031,38 +1020,37 @@ static void update_menus(u32 kDown)
 		{
 			switch (menuSel)
 			{
-			case 0: mode = MODE_DRAW; break;
-			case 1: mode = MODE_NEW; break;
-			case 2:
+			case MI_BACK: mode = MODE_DRAW; break;
+			case MI_HOME: open_home(true); break;
+			case MI_SAVE:
 				if (doc.name[0] && strcmp(doc.name, "_autosave")) { save_as_name(doc.name); mode = MODE_DRAW; }
 				else save_as();
 				break;
-			case 3: save_as(); break;
-			case 4: scan_projects(); openSel = 0; mode = MODE_OPEN; break;
-			case 5: scan_imports(); importSel = 0; mode = MODE_IMPORT; break;
-			case 6: mode = MODE_EXPORT; exportSel = 0; break;
-			case 7:
+			case MI_SAVEAS: save_as(); break;
+			case MI_IMPORT: scan_imports(); importSel = 0; mode = MODE_IMPORT; break;
+			case MI_EXPORT: mode = MODE_EXPORT; exportSel = 0; break;
+			case MI_SIZE:
 			{
 				int w = ask_number("New width (1-320)", doc.w, DOC_MAX_W);
 				int h = w ? ask_number("New height (1-240)", doc.h, DOC_MAX_H) : 0;
 				if (w && h) { resizeW = w; resizeH = h; mode = MODE_ANCHOR; }
 				break;
 			}
-			case 8:
+			case MI_SHIFT:
 				if (!layer_editable()) break;
 				shift_begin(&doc);
 				shiftX = shiftY = 0;
 				mode = MODE_SHIFT;
 				break;
-			case 9: colorsSel = 0; mode = MODE_COLORS; break;
-			case 10: viewSel = 0; mode = MODE_VIEW; break;
+			case MI_COLORS: colorsSel = 0; mode = MODE_COLORS; break;
+			case MI_VIEW: viewSel = 0; mode = MODE_VIEW; break;
 			case MENU_LINKED:
 				doc.linkedSwatches = !doc.linkedSwatches;
 				doc.dirty = true;
 				set_status(doc.linkedSwatches ? "Linked: editing a swatch recolors the drawing"
 				                              : "Unlinked: swatches are just saved colors");
 				break;
-			case 12:
+			case MI_EXIT:
 				if (doc.dirty) confirm(ACT_EXIT, "Exit without saving?");
 				else { remove(AUTOSAVE_PATH); running = false; }
 				break;
@@ -1107,7 +1095,7 @@ static void update_menus(u32 kDown)
 		break;
 	case MODE_CONFIRM:
 		if (kDown & KEY_A) run_action(confirmAction);
-		else if (kDown & KEY_B) mode = MODE_MENU;
+		else if (kDown & KEY_B) mode = confirmBack;
 		break;
 	default:
 		break;
@@ -1550,6 +1538,399 @@ static void update_more_menus(u32 kDown, u32 kHeld, touchPosition touch)
 	default: break;
 	}
 	(void)kHeld;
+}
+
+// ---- home screen ---------------------------------------------------------------------
+
+typedef struct {
+	char name[DOC_NAME_MAX];
+	long mtime;
+	int w, h, layers, tw, th;
+	bool loaded, failed;
+} GalItem;
+
+static GalItem gal[GFX_THUMB_SLOTS];
+static int galCount, galSel, homeTab = 1, homeNewSel;
+static float galScroll;                 // pixels scrolled in the gallery grid
+static bool homeFromCanvas;             // B goes back to the open canvas
+static int homeTouch;                   // 0 none, 1 tile tap, 2 scrolling
+static int homeTouchY, homeTouchStartY, homeTouchTile;
+static uint32_t thumbBuf[PXD_THUMB * PXD_THUMB];
+
+#define HOME_TAB_H 28
+#define HOME_TOP 32
+#define HOME_BAR_Y 208
+#define TILE_W 78
+#define TILE_H 88
+#define NEW_TILE_H 84
+
+static int gal_cmp(const void* a, const void* b)
+{
+	const GalItem *x = a, *y = b;
+	bool ax = !strcmp(x->name, "_autosave"), ay = !strcmp(y->name, "_autosave");
+	if (ax != ay) return ax ? -1 : 1;              // recovery file first
+	if (x->mtime != y->mtime) return x->mtime > y->mtime ? -1 : 1;
+	return strcasecmp(x->name, y->name);
+}
+
+static void scan_gallery(void)
+{
+	ensure_dirs();
+	galCount = 0;
+	DIR* dir = opendir(SAVE_DIR);
+	if (dir)
+	{
+		struct dirent* e;
+		while ((e = readdir(dir)) && galCount < GFX_THUMB_SLOTS)
+		{
+			size_t n = strlen(e->d_name);
+			if (n <= 4 || n - 4 >= DOC_NAME_MAX || strcasecmp(e->d_name + n - 4, ".pxd")) continue;
+			GalItem* g = &gal[galCount++];
+			memset(g, 0, sizeof(*g));
+			memcpy(g->name, e->d_name, n - 4);
+			char path[200];
+			project_path(path, sizeof(path), g->name);
+			struct stat st;
+			if (stat(path, &st) == 0) g->mtime = (long)st.st_mtime;
+		}
+		closedir(dir);
+	}
+	qsort(gal, galCount, sizeof(GalItem), gal_cmp);
+	if (galSel >= galCount) galSel = galCount ? galCount - 1 : 0;
+}
+
+// Load one missing thumbnail per call (keeps the screen responsive).
+static void gallery_load_some(void)
+{
+	int firstRow = (int)(galScroll / TILE_H), lastRow = firstRow + 3;
+	for (int i = firstRow * 4; i < galCount && i < lastRow * 4; i++)
+	{
+		GalItem* g = &gal[i];
+		if (g->loaded) continue;
+		g->loaded = true;
+		char path[200];
+		project_path(path, sizeof(path), g->name);
+		bool has = false;
+		if (!pxd_read_info(path, &g->w, &g->h, &g->layers, &has, thumbBuf, &g->tw, &g->th)) { g->failed = true; return; }
+		if (!has)
+		{
+			// older file without a stored thumbnail: build one from the project
+			static Doc tmp;
+			if (pxd_load(&tmp, path)) { g->failed = true; return; }
+			pxd_make_thumb(&tmp, thumbBuf, &g->tw, &g->th);
+			doc_free(&tmp);
+		}
+		gfx_thumb_set(i, thumbBuf, g->tw, g->th);
+		return;
+	}
+}
+
+static void open_home(bool fromCanvas)
+{
+	finish_floating();
+	homeFromCanvas = fromCanvas;
+	scan_gallery();
+	if (galCount == 0) homeTab = 0;
+	galScroll = 0;
+	galSel = 0;
+	mode = MODE_HOME;
+}
+
+static void gallery_scroll_to_sel(void)
+{
+	float rowY = (galSel / 4) * TILE_H, viewH = HOME_BAR_Y - HOME_TOP;
+	if (rowY < galScroll) galScroll = rowY;
+	if (rowY + TILE_H > galScroll + viewH) galScroll = rowY + TILE_H - viewH;
+}
+
+static void home_create(int i)
+{
+	const Preset* p = &PRESETS[i];
+	if (p->w) request_new(p->w, p->h);
+	else
+	{
+		int w = ask_number("Width (1-320)", 32, DOC_MAX_W);
+		int h = w ? ask_number("Height (1-240)", 32, DOC_MAX_H) : 0;
+		if (w && h) request_new(w, h);
+	}
+}
+
+static void home_open(void)
+{
+	if (!galCount) return;
+	snprintf(openFiles[0], sizeof(openFiles[0]), "%s", gal[galSel].name);
+	openSel = 0;
+	if (doc.dirty && homeFromCanvas) confirm(ACT_OPEN, "Discard unsaved changes?");
+	else run_action(ACT_OPEN);
+}
+
+static void gallery_rename(void)
+{
+	char nm[DOC_NAME_MAX], from[200], to[200];
+	if (!galCount || !ask_text("New name", gal[galSel].name, nm, sizeof(nm))) return;
+	project_path(from, sizeof(from), gal[galSel].name);
+	project_path(to, sizeof(to), nm);
+	if (file_exists(to)) { set_status("A project with that name exists"); return; }
+	if (rename(from, to)) { set_status("Rename failed"); return; }
+	if (!strcmp(doc.name, gal[galSel].name)) snprintf(doc.name, sizeof(doc.name), "%s", nm);
+	set_status("Renamed");
+	scan_gallery();
+}
+
+static void gallery_duplicate(void)
+{
+	if (!galCount) return;
+	char from[200], to[200], nm[DOC_NAME_MAX];
+	project_path(from, sizeof(from), gal[galSel].name);
+	for (int k = 1; k < 100; k++)
+	{
+		if (k == 1) snprintf(nm, sizeof(nm), "%.*s_copy", DOC_NAME_MAX - 12, gal[galSel].name);
+		else snprintf(nm, sizeof(nm), "%.*s_copy%d", DOC_NAME_MAX - 12, gal[galSel].name, k);
+		project_path(to, sizeof(to), nm);
+		if (!file_exists(to)) break;
+	}
+	FILE *in = fopen(from, "rb"), *out = in ? fopen(to, "wb") : NULL;
+	bool ok = in && out;
+	char buf[4096];
+	size_t n;
+	while (ok && (n = fread(buf, 1, sizeof(buf), in)) > 0)
+		ok = fwrite(buf, 1, n, out) == n;
+	if (in) fclose(in);
+	if (out && fclose(out)) ok = false;
+	if (!ok) { remove(to); set_status("Duplicate failed"); return; }
+	set_status("Duplicated");
+	scan_gallery();
+}
+
+static void gallery_delete(void)
+{
+	char path[200];
+	project_path(path, sizeof(path), gal[galSel].name);
+	if (remove(path)) set_status("Delete failed");
+	else
+	{
+		if (!strcmp(doc.name, gal[galSel].name)) { doc.name[0] = 0; doc.dirty = true; }
+		set_status("Deleted");
+	}
+	scan_gallery();
+	for (int i = 0; i < galCount; i++) gal[i].loaded = false;   // slots moved
+	mode = MODE_HOME;
+}
+
+static void gallery_export(void)
+{
+	if (!galCount) return;
+	char path[200];
+	project_path(path, sizeof(path), gal[galSel].name);
+	static Doc tmp;
+	if (pxd_load(&tmp, path)) { set_status("Couldn't open project"); return; }
+	run_export_doc(&tmp, gal[galSel].name);
+	doc_free(&tmp);
+}
+
+static const char* GAL_ACTS[] = { "Open", "Rename", "Copy", "Delete", "Export" };
+
+static void gallery_action(int a)
+{
+	if (!galCount) return;
+	switch (a)
+	{
+	case 0: home_open(); break;
+	case 1: gallery_rename(); break;
+	case 2: gallery_duplicate(); for (int i = 0; i < galCount; i++) gal[i].loaded = false; break;
+	case 3:
+	{
+		char msg[96];
+		snprintf(msg, sizeof(msg), "Delete %.40s?", gal[galSel].name);
+		confirm(ACT_DELETE_GAL, msg);
+		break;
+	}
+	case 4: gallery_export(); break;
+	}
+}
+
+static void update_home(u32 kDown, u32 kHeld, touchPosition t)
+{
+	if (kDown & (KEY_L | KEY_R)) homeTab ^= 1;
+	if ((kDown & KEY_B) && homeFromCanvas) { mode = MODE_DRAW; return; }
+	if ((kDown & KEY_B) && !homeFromCanvas) { mode = MODE_DRAW; set_status("Blank 32x32 canvas - START > Home to come back"); return; }
+
+	int count = homeTab ? galCount : PRESET_COUNT;
+	int* sel = homeTab ? &galSel : &homeNewSel;
+	if (count)
+	{
+		if (kDown & KEY_DLEFT) *sel = (*sel + count - 1) % count;
+		if (kDown & KEY_DRIGHT) *sel = (*sel + 1) % count;
+		if ((kDown & KEY_DUP) && *sel >= 4) *sel -= 4;
+		if ((kDown & KEY_DDOWN) && *sel + 4 < count) *sel += 4;
+		if (homeTab) gallery_scroll_to_sel();
+	}
+	if (kDown & KEY_A)
+	{
+		if (homeTab) home_open();
+		else home_create(homeNewSel);
+		return;
+	}
+	if (homeTab && (kDown & KEY_X)) gallery_action(3);   // X: delete
+	if (homeTab && (kDown & KEY_Y)) gallery_action(1);   // Y: rename
+
+	if (kDown & KEY_TOUCH)
+	{
+		homeTouch = 0;
+		if (t.py < HOME_TAB_H) { homeTab = t.px >= BOT_W / 2; return; }
+		if (homeTab && t.py >= HOME_BAR_Y)
+		{
+			int b = t.px / (BOT_W / 5);
+			if (b >= 0 && b < 5) gallery_action(b);
+			return;
+		}
+		homeTouch = 1;
+		homeTouchY = homeTouchStartY = t.py;
+		int col = (t.px - 2) / TILE_W, row;
+		if (homeTab) row = (int)((t.py - HOME_TOP + galScroll) / TILE_H);
+		else row = (t.py - HOME_TOP) / (NEW_TILE_H + 4);
+		homeTouchTile = (col >= 0 && col < 4 && row >= 0) ? row * 4 + col : -1;
+	}
+	else if ((kHeld & KEY_TOUCH) && homeTouch)
+	{
+		if (homeTab && (homeTouch == 2 || abs(t.py - homeTouchStartY) > 6))
+		{
+			homeTouch = 2;    // drag scrolls the gallery
+			galScroll -= t.py - homeTouchY;
+			float maxScroll = ((galCount + 3) / 4) * TILE_H - (HOME_BAR_Y - HOME_TOP);
+			if (galScroll > maxScroll) galScroll = maxScroll;
+			if (galScroll < 0) galScroll = 0;
+		}
+		homeTouchY = t.py;
+	}
+	else if (!(kHeld & KEY_TOUCH) && homeTouch)
+	{
+		if (homeTouch == 1 && homeTouchTile >= 0 && homeTouchTile < count)
+		{
+			if (homeTouchTile == *sel)
+			{
+				if (homeTab) home_open();       // tap the selected tile again to open it
+				else home_create(homeTouchTile);
+			}
+			else *sel = homeTouchTile;
+		}
+		homeTouch = 0;
+	}
+}
+
+static void draw_home_bottom(void)
+{
+	C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, BOT_H, C_BG_TOP);
+	// tabs
+	for (int i = 0; i < 2; i++)
+	{
+		float x = i * BOT_W / 2;
+		C2D_DrawRectSolid(x + 2, 2, 0.5f, BOT_W / 2 - 4, HOME_TAB_H - 4, homeTab == i ? C_SEL : C_PANEL);
+		const char* lab = i ? "Gallery" : "New";
+		gfx_text(x + (BOT_W / 2 - gfx_text_width(0.55f, lab)) / 2, 6, 0.55f, homeTab == i ? C_ACCENT : C_TEXT, "%s", lab);
+	}
+	if (!homeTab)
+	{
+		for (int i = 0; i < PRESET_COUNT; i++)
+		{
+			float x = 2 + (i % 4) * TILE_W, y = HOME_TOP + (i / 4) * (NEW_TILE_H + 4);
+			C2D_DrawRectSolid(x + 2, y, 0.5f, TILE_W - 4, NEW_TILE_H, i == homeNewSel ? C_SEL : C_PANEL);
+			if (i == homeNewSel) gfx_rect_outline(x + 2, y, TILE_W - 4, NEW_TILE_H, 2, C_ACCENT);
+			const Preset* p = &PRESETS[i];
+			if (p->w)
+			{
+				// canvas shape preview
+				float sc = fminf(56.0f / p->w, 50.0f / p->h);
+				float pw = p->w * sc, ph = p->h * sc;
+				gfx_draw_checker(x + (TILE_W - pw) / 2, y + 6 + (50 - ph) / 2, pw, ph, 4);
+			}
+			else
+				gfx_text(x + 30, y + 18, 1.0f, C_DIM, "?");
+			gfx_text(x + (TILE_W - gfx_text_width(0.45f, p->label)) / 2, y + 64, 0.45f, C_TEXT, "%s", p->label);
+		}
+		gfx_text(8, 222, 0.42f, C_DIM, "Tap a size twice (or A) to start.  L/R: switch tab");
+		return;
+	}
+	if (galCount == 0)
+	{
+		gfx_text(16, 80, 0.5f, C_DIM, "No saved projects yet.");
+		gfx_text(16, 100, 0.45f, C_DIM, "Save one with START > Save, and it shows up here.");
+		return;
+	}
+	for (int i = 0; i < galCount; i++)
+	{
+		float x = 2 + (i % 4) * TILE_W, y = HOME_TOP + (i / 4) * TILE_H - galScroll;
+		if (y + TILE_H < HOME_TOP || y > HOME_BAR_Y) continue;
+		GalItem* g = &gal[i];
+		C2D_DrawRectSolid(x + 2, y, 0.5f, TILE_W - 4, TILE_H - 4, i == galSel ? C_SEL : C_PANEL);
+		if (g->loaded && !g->failed)
+			gfx_draw_thumb(i, g->tw, g->th, x + (TILE_W - g->tw) / 2, y + 3 + (64 - g->th) / 2, 1);
+		else
+			gfx_text(x + 20, y + 26, 0.45f, C_DIM, g->failed ? "error" : "...");
+		if (i == galSel) gfx_rect_outline(x + 2, y, TILE_W - 4, TILE_H - 4, 2, C_ACCENT);
+		bool rec = !strcmp(g->name, "_autosave");
+		char nm[14];
+		snprintf(nm, sizeof(nm), "%.12s", rec ? "recovered" : g->name);
+		gfx_text(x + (TILE_W - gfx_text_width(0.4f, nm)) / 2, y + 70, 0.4f, rec ? C_ACCENT : C_TEXT, "%s", nm);
+	}
+	// keep the tabs and action bar on top of scrolled tiles
+	C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, HOME_TOP - 2, C_BG_TOP);
+	for (int i = 0; i < 2; i++)
+	{
+		float x = i * BOT_W / 2;
+		C2D_DrawRectSolid(x + 2, 2, 0.5f, BOT_W / 2 - 4, HOME_TAB_H - 4, homeTab == i ? C_SEL : C_PANEL);
+		const char* lab = i ? "Gallery" : "New";
+		gfx_text(x + (BOT_W / 2 - gfx_text_width(0.55f, lab)) / 2, 6, 0.55f, homeTab == i ? C_ACCENT : C_TEXT, "%s", lab);
+	}
+	C2D_DrawRectSolid(0, HOME_BAR_Y - 2, 0.5f, BOT_W, BOT_H - HOME_BAR_Y + 2, C_BG_TOP);
+	for (int b = 0; b < 5; b++)
+	{
+		float x = b * (BOT_W / 5);
+		u32 bg = b == 3 ? C2D_Color32(120, 50, 50, 255) : b == 0 ? C2D_Color32(40, 120, 70, 255) : C_PANEL;
+		C2D_DrawRectSolid(x + 2, HOME_BAR_Y + 2, 0.5f, BOT_W / 5 - 4, BOT_H - HOME_BAR_Y - 6, bg);
+		gfx_text(x + (BOT_W / 5 - gfx_text_width(0.45f, GAL_ACTS[b])) / 2, HOME_BAR_Y + 9, 0.45f, C_TEXT, "%s", GAL_ACTS[b]);
+	}
+}
+
+static void draw_home_top(void)
+{
+	C2D_DrawRectSolid(0, 0, 0.5f, 400, 240, C_BG_TOP);
+	gfx_text(14, 10, 0.8f, C_ACCENT, APP_NAME);
+	gfx_text(16, 34, 0.42f, C_DIM, "Pixel art & UI for Crow and other robots");
+	float bx = 120, by = 60, bw = 260, bh = 150;
+	C2D_DrawRectSolid(bx, by, 0.5f, bw, bh, C_BG_BOT);
+	if (!homeTab)
+	{
+		const Preset* p = &PRESETS[homeNewSel];
+		gfx_text(16, 66, 0.6f, C_TEXT, "New canvas");
+		gfx_text(16, 88, 0.5f, C_DIM, "%s", p->w ? p->label : "Custom size");
+		if (p->w)
+		{
+			float sc = fminf((bw - 20) / p->w, (bh - 20) / p->h);
+			if (sc >= 1) sc = floorf(sc);
+			gfx_draw_checker(bx + (bw - p->w * sc) / 2, by + (bh - p->h * sc) / 2, p->w * sc, p->h * sc, 6);
+		}
+		gfx_text(16, 222, 0.42f, C_DIM, "D-pad: choose   A: create   L/R: Gallery%s", homeFromCanvas ? "   B: back" : "");
+		return;
+	}
+	if (!galCount)
+	{
+		gfx_text(16, 66, 0.55f, C_DIM, "Gallery is empty");
+		return;
+	}
+	GalItem* g = &gal[galSel];
+	bool rec = !strcmp(g->name, "_autosave");
+	gfx_text(16, 66, 0.55f, rec ? C_ACCENT : C_TEXT, "%.18s", rec ? "Recovered work" : g->name);
+	if (g->loaded && !g->failed)
+	{
+		gfx_text(16, 88, 0.45f, C_DIM, "%d x %d", g->w, g->h);
+		gfx_text(16, 104, 0.45f, C_DIM, "%d layer%s", g->layers, g->layers == 1 ? "" : "s");
+		float sc = fminf((bw - 20) / g->tw, (bh - 20) / g->th);
+		if (sc >= 1) sc = floorf(sc);
+		gfx_draw_thumb(galSel, g->tw, g->th, bx + (bw - g->tw * sc) / 2, by + (bh - g->th * sc) / 2, sc);
+	}
+	gfx_text(16, 124, 0.42f, C_DIM, "%d of %d", galSel + 1, galCount);
+	gfx_text(16, 222, 0.42f, C_DIM, "A: open  X: delete  Y: rename  L/R: New tab%s", homeFromCanvas ? "  B: back" : "");
 }
 
 // ---- draw mode input -------------------------------------------------------------
@@ -2020,6 +2401,11 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 
 static void draw_bottom(void)
 {
+	if (mode == MODE_HOME || (mode == MODE_CONFIRM && confirmBack == MODE_HOME))
+	{
+		draw_home_bottom();
+		return;
+	}
 	if (mode == MODE_PICKER)
 	{
 		picker_draw();
@@ -2343,7 +2729,12 @@ static void draw_list(const char* title, const char* const* items, int count, in
 
 static void draw_top(void)
 {
-	if (previewMode && mode == MODE_DRAW)
+	if (mode == MODE_HOME || (mode == MODE_CONFIRM && confirmBack == MODE_HOME))
+	{
+		draw_home_top();
+		if (mode != MODE_CONFIRM) { if (statusTimer > 0) gfx_text(16, 204, 0.45f, C_ACCENT, "%s", status); return; }
+	}
+	else if (previewMode && mode == MODE_DRAW)
 		draw_top_preview();
 	else
 		draw_top_tools();
@@ -2578,7 +2969,8 @@ int main(int argc, char* argv[])
 	export_recommended();
 	curColor = doc.swatches[0];
 	if (file_exists(AUTOSAVE_PATH))
-		set_status("Unsaved work was recovered: START > Open > _autosave");
+		set_status("Unsaved work was recovered: it's first in the Gallery");
+	open_home(false);
 
 	while (running && aptMainLoop())
 	{
@@ -2636,8 +3028,12 @@ int main(int argc, char* argv[])
 			update_options(kDown);
 		else if (mode == MODE_SHIFT)
 			update_shift(kDown, kHeld, touch);
+		else if (mode == MODE_HOME)
+			update_home(kDown, kHeld, touch);
 		else if (mode >= MODE_LAYERS)
 			update_more_menus(kDown, kHeld, touch);
+		if (mode == MODE_HOME)
+			gallery_load_some();
 		else
 			update_menus(kDown);
 

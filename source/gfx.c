@@ -7,7 +7,10 @@
 #define CANVAS_TEX_W 512
 #define CANVAS_TEX_H 256
 
-static C3D_Tex canvasTex, checkerTex;
+static C3D_Tex canvasTex, checkerTex, thumbTex;
+static bool thumbReady;
+#define THUMB_TEX_W 512
+#define THUMB_TEX_H 1024
 static bool canvasDirty;
 static C2D_TextBuf textBuf;
 
@@ -41,6 +44,7 @@ bool gfx_init(void)
 
 void gfx_fini(void)
 {
+	if (thumbReady) C3D_TexDelete(&thumbTex);
 	C2D_TextBufDelete(textBuf);
 	C3D_TexDelete(&canvasTex);
 	C3D_TexDelete(&checkerTex);
@@ -110,6 +114,34 @@ void gfx_draw_canvas_ex(const Doc* d, float x, float y, float scale, bool flipX)
 	float u = (float)d->w / CANVAS_TEX_W, v = (float)d->h / CANVAS_TEX_H;
 	if (flipX) draw_tex(&canvasTex, x, y, w, h, u, 0, 0, v);
 	else draw_tex(&canvasTex, x, y, w, h, 0, 0, u, v);
+}
+
+void gfx_thumb_set(int slot, const uint32_t* rgba, int w, int h)
+{
+	if (slot < 0 || slot >= GFX_THUMB_SLOTS) return;
+	if (!thumbReady)
+	{
+		// created on first use so it only costs memory when the gallery is shown
+		if (!C3D_TexInit(&thumbTex, THUMB_TEX_W, THUMB_TEX_H, GPU_RGBA8)) return;
+		C3D_TexSetFilter(&thumbTex, GPU_NEAREST, GPU_NEAREST);
+		C3D_TexSetWrap(&thumbTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+		thumbReady = true;
+	}
+	int ox = (slot % 8) * 64, oy = (slot / 8) * 64;
+	u32* t = (u32*)thumbTex.data;
+	for (int y = 0; y < 64; y++)
+		for (int x = 0; x < 64; x++)
+			t[tiled(ox + x, oy + y, THUMB_TEX_W)] = (x < w && y < h) ? rgba[y * w + x] : 0;
+	C3D_TexFlush(&thumbTex);
+}
+
+void gfx_draw_thumb(int slot, int w, int h, float x, float y, float scale)
+{
+	if (!thumbReady || slot < 0 || slot >= GFX_THUMB_SLOTS) return;
+	int ox = (slot % 8) * 64, oy = (slot / 8) * 64;
+	gfx_draw_checker(x, y, w * scale, h * scale, 4);
+	draw_tex(&thumbTex, x, y, w * scale, h * scale, (float)ox / THUMB_TEX_W, (float)oy / THUMB_TEX_H,
+	         (float)(ox + w) / THUMB_TEX_W, (float)(oy + h) / THUMB_TEX_H);
 }
 
 void gfx_text(float x, float y, float scale, u32 color, const char* fmt, ...)

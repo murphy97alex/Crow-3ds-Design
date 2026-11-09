@@ -14,6 +14,7 @@ without breaking old files. A file ends with an `END ` chunk.
 | Chunk | Payload |
 |-------|---------|
 | `HEAD` | u16 version (3), u16 width, u16 height, u16 frame count, u16 fps, u16 flags (bit 0 = linked swatches), u16 current layer index, 2 bytes reserved |
+| `THMB` | thumbnail of frame 0 for the gallery: u16 w, u16 h (each ≤ 64), then w × h pixels as R,G,B,A bytes. Written right after `HEAD` so it can be read without loading the rest |
 | `PALT` | color table: up to 255 colors, u32 each, `0xRRGGBBAA`. Pixel value *n* uses entry *n* (1-based) |
 | `SWAT` | the 32 swatches shown in the palette strip, u32 each. Saved colors only; pixels never refer to them |
 | `LAYR` | one per layer, bottom first: u16 id, u16 folder id + 1 (0 = none), u8 flags (1 folder, 2 visible, 4 locked, 8 collapsed), u8 opacity, 2 bytes reserved, name (16 bytes, NUL padded). A layer's `FRAM` chunks follow it; folders have none. Folder members sit directly below their folder |

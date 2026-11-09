@@ -3,6 +3,13 @@
 Homebrew pixel-art / UI drawing app for the New 3DS, written in C with
 libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 
+## Home screen
+The app opens on **Home** (also START → Home):
+- **New** tab: tap a canvas size twice (or A) to start, or Custom.
+- **Gallery** tab: thumbnails of saved projects, newest first (a recovered autosave shows first).
+  Tap to select, tap again or A to open; drag to scroll. Buttons: Open, Rename, Copy, Delete, Export
+  (PNG with your export sizes). X deletes, Y renames, L/R switch tabs, B goes to the canvas.
+
 ## Controls
 | Input | Action |
 |---|---|
@@ -28,7 +35,7 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | Y | Layers: up/down pick, X show/hide, left/right opacity, L/R move, A = new layer/folder, duplicate, delete, move, merge down/visible, lock, rename, collapse folder |
 | Bottom row of the palette strip | Recent colors (tap to reuse) |
 | SELECT | Top screen: tools/info ↔ big preview at 1x, 2x, 3x… |
-| START | Menu: new canvas, save, save as, open, import PNG, export PNG, canvas size (with anchor), shift layer, Colors (ramp between swatches, adjust hue/saturation/brightness/invert), View (flip preview, 3x3 tile preview, HUD grid, isometric grid, autosave), linked swatches, exit |
+| START | Menu: Home (new / gallery), save, save as, import PNG, export PNG, canvas size (with anchor), shift layer, Colors (ramp between swatches, adjust hue/saturation/brightness/invert), View (flip preview, 3x3 tile preview, HUD grid, isometric grid, autosave), linked swatches, exit |
 
 Projects are saved to `/3ds/pixel-ui-designer/projects/*.pxd` ([format](docs/PXD.md)),
 stamps to `/3ds/pixel-ui-designer/stamps/`, PNG exports to `/3ds/pixel-ui-designer/export/`,

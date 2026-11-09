@@ -81,6 +81,8 @@ Stylus in right hand, frequent actions on left.
   rename, folders). .pxd v3.
 - **M5 (v0.5.0):** Text tool: 6 fonts (Tom Thumb, PICO-8, Spleen 5x8, Kenney Pixel + original CC0
   Crow Term and Crow Industrial), size 1-4x, spacing, outline, multiline, move/retype/place.
+- **M6 (v0.6.0):** Home screen on launch: New (size tiles) and Gallery (thumbnails, newest first,
+  open/rename/copy/delete/export); thumbnails stored in .pxd (THMB chunk).
 - **Next (Alex picks):**
   - **Camera mode** (filters → pixel art; shelved for now), **left-handed mode**.
   - **v2 animator** after layers.

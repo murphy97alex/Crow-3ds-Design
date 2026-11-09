@@ -72,6 +72,24 @@ const char* pxd_save(const Doc* d, const char* path)
 	put16(head + 12, d->curLayer);
 	ok = ok && write_chunk(f, "HEAD", head, sizeof(head));
 
+	// THMB: u16 w, u16 h, then w*h RGBA pixels (bytes R,G,B,A). Lets the gallery skip the rest.
+	{
+		static uint32_t th[PXD_THUMB * PXD_THUMB];
+		static uint8_t tb[4 + PXD_THUMB * PXD_THUMB * 4];
+		int tw, tht;
+		pxd_make_thumb(d, th, &tw, &tht);
+		put16(tb, tw);
+		put16(tb + 2, tht);
+		for (int i = 0; i < tw * tht; i++)
+		{
+			tb[4 + i * 4] = th[i] >> 24;
+			tb[5 + i * 4] = th[i] >> 16;
+			tb[6 + i * 4] = th[i] >> 8;
+			tb[7 + i * 4] = th[i];
+		}
+		ok = ok && write_chunk(f, "THMB", tb, 4 + tw * tht * 4);
+	}
+
 	uint8_t pal[DOC_MAX_COLORS * 4];
 	for (int i = 0; i < d->colorCount; i++)
 		put32(pal + i * 4, d->colors[i + 1]);
@@ -109,6 +127,72 @@ const char* pxd_save(const Doc* d, const char* path)
 	remove(path);
 	if (rename(tmp, path) != 0) { remove(tmp); return "Rename failed"; }
 	return NULL;
+}
+
+void pxd_make_thumb(const Doc* d, uint32_t* out, int* tw, int* th)
+{
+	int w = d->w, h = d->h;
+	// whole-number enlarge for small canvases, plain shrink for big ones
+	int up = PXD_THUMB / (w > h ? w : h);
+	if (up >= 1) { *tw = w * up; *th = h * up; }
+	else if (w >= h) { *tw = PXD_THUMB; *th = h * PXD_THUMB / w; }
+	else { *th = PXD_THUMB; *tw = w * PXD_THUMB / h; }
+	if (*tw < 1) *tw = 1;
+	if (*th < 1) *th = 1;
+	uint32_t* full = malloc((size_t)w * h * 4);
+	if (!full) { memset(out, 0, (size_t)*tw * *th * 4); return; }
+	doc_composite(d, 0, full);
+	for (int y = 0; y < *th; y++)
+		for (int x = 0; x < *tw; x++)
+			out[y * *tw + x] = full[(y * h / *th) * w + x * w / *tw];
+	free(full);
+}
+
+bool pxd_read_info(const char* path, int* w, int* h, int* layers, bool* hasThumb,
+                   uint32_t* thumb, int* tw, int* th)
+{
+	FILE* f = fopen(path, "rb");
+	if (!f) return false;
+	uint8_t hdr[8];
+	bool gotHead = false;
+	*hasThumb = false;
+	*layers = 0;
+	if (fread(hdr, 1, 4, f) != 4 || memcmp(hdr, "PXD\x1A", 4)) { fclose(f); return false; }
+	while (fread(hdr, 1, 8, f) == 8)
+	{
+		uint32_t len = get32(hdr + 4);
+		if (!memcmp(hdr, "HEAD", 4) && len >= 12 && len <= 64)
+		{
+			uint8_t b[64];
+			if (fread(b, 1, len, f) != len) break;
+			*w = get16(b + 2);
+			*h = get16(b + 4);
+			gotHead = true;
+			continue;
+		}
+		if (!memcmp(hdr, "THMB", 4) && len >= 4 && len <= 4 + PXD_THUMB * PXD_THUMB * 4)
+		{
+			uint8_t b[4];
+			if (fread(b, 1, 4, f) != 4) break;
+			*tw = get16(b);
+			*th = get16(b + 2);
+			if (*tw < 1 || *th < 1 || *tw > PXD_THUMB || *th > PXD_THUMB || (uint32_t)(4 + *tw * *th * 4) != len) break;
+			for (int i = 0; i < *tw * *th; i++)
+			{
+				uint8_t p[4];
+				if (fread(p, 1, 4, f) != 4) break;
+				thumb[i] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+			}
+			*hasThumb = true;
+			continue;
+		}
+		if (!memcmp(hdr, "LAYR", 4)) (*layers)++;
+		if (!memcmp(hdr, "FRAM", 4) && *layers == 0) *layers = 1;   // pre-layer files
+		if (!memcmp(hdr, "END ", 4)) break;
+		if (fseek(f, len, SEEK_CUR)) break;
+	}
+	fclose(f);
+	return gotHead;
 }
 
 const char* pxd_load(Doc* d, const char* path)
