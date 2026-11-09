@@ -4,7 +4,7 @@ Homebrew pixel-art / UI drawing app for the New 3DS, written in C with
 libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 
 ## Home screen
-The app opens on **Home** (also START → Home):
+The app opens on **Home** (also START → Home). START on Home exits the app:
 - **New** tab: tap a canvas size twice (or A) to start, or Custom.
 - **Gallery** tab: thumbnails of saved projects, newest first (a recovered autosave shows first).
   Tap to select, tap again or A to open; drag to scroll. Buttons: Open, Rename, Copy, Delete, Export

@@ -1751,6 +1751,12 @@ static void gallery_action(int a)
 
 static void update_home(u32 kDown, u32 kHeld, touchPosition t)
 {
+	if (kDown & KEY_START)
+	{
+		if (doc.dirty) confirm(ACT_EXIT, "Exit without saving?");
+		else { remove(AUTOSAVE_PATH); running = false; }
+		return;
+	}
 	if (kDown & (KEY_L | KEY_R)) homeTab ^= 1;
 	if ((kDown & KEY_B) && homeFromCanvas) { mode = MODE_DRAW; return; }
 	if ((kDown & KEY_B) && !homeFromCanvas) { mode = MODE_DRAW; set_status("Blank 32x32 canvas - START > Home to come back"); return; }
@@ -1897,6 +1903,7 @@ static void draw_home_top(void)
 	C2D_DrawRectSolid(0, 0, 0.5f, 400, 240, C_BG_TOP);
 	gfx_text(14, 10, 0.8f, C_ACCENT, APP_NAME);
 	gfx_text(16, 34, 0.42f, C_DIM, "Pixel art & UI for Crow and other robots");
+	gfx_text(400 - 8 - gfx_text_width(0.42f, "START: exit"), 14, 0.42f, C_DIM, "START: exit");
 	float bx = 120, by = 60, bw = 260, bh = 150;
 	C2D_DrawRectSolid(bx, by, 0.5f, bw, bh, C_BG_BOT);
 	if (!homeTab)
