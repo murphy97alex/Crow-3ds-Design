@@ -3032,10 +3032,10 @@ int main(int argc, char* argv[])
 			update_home(kDown, kHeld, touch);
 		else if (mode >= MODE_LAYERS)
 			update_more_menus(kDown, kHeld, touch);
-		if (mode == MODE_HOME)
-			gallery_load_some();
 		else
 			update_menus(kDown);
+		if (mode == MODE_HOME)
+			gallery_load_some();
 
 		if (statusTimer > 0)
 			statusTimer--;
