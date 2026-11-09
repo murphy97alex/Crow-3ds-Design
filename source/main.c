@@ -82,6 +82,9 @@ static int textFont = 4, textScale = 1, textSpacing = 0, textOutline = -1;  // o
 static char textStr[TEXT_MAX];
 static bool textOn;                    // floating text waiting to be placed
 static bool textMoved;
+static bool textSizing;                // dragging the resize handle
+#define TEXT_MAX_SCALE 8
+#define HANDLE 14                      // resize handle size on screen (pixels)
 
 static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
 static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bottom", "Both" };
@@ -339,6 +342,18 @@ static void text_edit(void)
 		text_refresh();
 }
 
+static float canvas_sx(void);
+static float canvas_sy(void);
+
+// Screen rectangle of the floating text's resize handle (bottom-right corner).
+static void text_handle(float* hx, float* hy)
+{
+	Rect r = sel_rect();
+	float z = ZOOMS[zoomIdx];
+	*hx = canvas_sx() + (r.x + r.w) * z - HANDLE / 2;
+	*hy = canvas_sy() + (r.y + r.h) * z - HANDLE / 2;
+}
+
 static void set_tool(Tool t)
 {
 	if (t == tool)
@@ -561,7 +576,7 @@ static void opt_change(OptKind k, int dir)
 	case OPT_SELMODE: selMode = (selMode + SELMODE_COUNT + dir) % SELMODE_COUNT; break;
 	case OPT_WANDALL: wandAll = !wandAll; break;
 	case OPT_FONT: textFont = (textFont + FONT_COUNT + dir) % FONT_COUNT; break;
-	case OPT_TSCALE: textScale = textScale + dir < 1 ? 1 : textScale + dir > 4 ? 4 : textScale + dir; break;
+	case OPT_TSCALE: textScale = textScale + dir < 1 ? 1 : textScale + dir > TEXT_MAX_SCALE ? TEXT_MAX_SCALE : textScale + dir; break;
 	case OPT_TSPACING: textSpacing = textSpacing + dir < -1 ? -1 : textSpacing + dir > 4 ? 4 : textSpacing + dir; break;
 	case OPT_TOUTLINE: textOutline = (textOutline + 1 + DOC_PALETTE_SIZE + 1 + dir) % (DOC_PALETTE_SIZE + 1) - 1; break;
 	case OPT_MIRROR: // Left-right, Top-bottom, Both ("Off" is the On/Off row)
@@ -1645,7 +1660,15 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		{
 			touchTarget = TOUCH_CANVAS;
 			selDrag = SEL_IDLE;
-			if (textOn && sel_contains(cx, cy))
+			float hx = 0, hy = 0;
+			if (textOn) text_handle(&hx, &hy);
+			if (textOn && touch.px >= hx - 4 && touch.px < hx + HANDLE + 4 && touch.py >= hy - 4 && touch.py < hy + HANDLE + 4)
+			{
+				textSizing = true;                  // grab the resize handle
+				textMoved = true;
+				selDrag = SEL_SIZING;
+			}
+			else if (textOn && sel_contains(cx, cy))
 			{
 				Rect r = sel_rect();
 				moveOffX = cx - r.x;
@@ -1664,6 +1687,25 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				return;
 			}
 		}
+		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_SIZING && textSizing)
+		{
+			// whole-number sizes keep pixels crisp: pick the scale whose width is closest
+			Rect r = sel_rect();
+			int pad = textOutline >= 0 ? 1 : 0;
+			int unit = (r.w - 2 * pad) / textScale;   // width at 1x
+			int unitH = (r.h - 2 * pad) / textScale;
+			if (unit < 1) unit = 1;
+			if (unitH < 1) unitH = 1;
+			float want = fmaxf((float)(cx - r.x + 1) / unit, (float)(cy - r.y + 1) / unitH);
+			int ns = (int)lroundf(want);
+			if (ns < 1) ns = 1;
+			if (ns > TEXT_MAX_SCALE) ns = TEXT_MAX_SCALE;
+			if (ns != textScale)
+			{
+				textScale = ns;
+				text_refresh();
+			}
+		}
 		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_MOVING && (textMoved || cx != startCX || cy != startCY))
 		{
 			textMoved = true;
@@ -1674,6 +1716,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		{
 			if (selDrag == SEL_MOVING && !textMoved)
 				text_edit();                        // tapped the text: retype it
+			textSizing = false;
 			selDrag = SEL_IDLE;
 			touchTarget = TOUCH_NONE;
 		}
@@ -2127,6 +2170,24 @@ static void draw_bottom(void)
 		}
 	}
 
+	// text resize handle
+	if (tool == TOOL_TEXT && textOn && sel_floating())
+	{
+		float hx, hy;
+		text_handle(&hx, &hy);
+		if (hy + HANDLE > VIEW_Y)
+		{
+			C2D_DrawRectSolid(hx, hy, 0.5f, HANDLE, HANDLE, C2D_Color32(0, 0, 0, 255));
+			C2D_DrawRectSolid(hx + 1, hy + 1, 0.5f, HANDLE - 2, HANDLE - 2, C_ACCENT);
+			// diagonal arrow
+			u32 k = C2D_Color32(0, 0, 0, 255);
+			C2D_DrawLine(hx + 3, hy + 3, k, hx + HANDLE - 4, hy + HANDLE - 4, k, 1.5f, 0.5f);
+			C2D_DrawRectSolid(hx + HANDLE - 8, hy + HANDLE - 5, 0.5f, 5, 1.5f, k);
+			C2D_DrawRectSolid(hx + HANDLE - 5, hy + HANDLE - 8, 0.5f, 1.5f, 5, k);
+			gfx_text(hx + HANDLE + 2, hy + 1, 0.4f, C_ACCENT, "%dx", textScale);
+		}
+	}
+
 	if (mode != MODE_DRAW && mode != MODE_SHIFT && mode != MODE_RAMP && mode != MODE_ADJUST && mode != MODE_LAYERS)
 		C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, BOT_H, C2D_Color32(0, 0, 0, 0x90));
 }
@@ -2203,7 +2264,7 @@ static void draw_top_tools(void)
 	else if (tool == TOOL_SELECT)
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag: select / move.  A: actions  B: deselect");
 	else if (tool == TOOL_TEXT)
-		gfx_text(10, 222, 0.42f, C_DIM, textOn ? "Drag: move  Tap it: edit  B / tap outside: place"
+		gfx_text(10, 222, 0.42f, C_DIM, textOn ? "Drag: move  Corner tab: size  Tap: edit  B: place"
 		                                       : "Tap the canvas to type.  A: font, size, outline");
 	else if (tool == TOOL_STAMP)
 		gfx_text(10, 222, 0.42f, C_DIM, stampDragSize ? "Drag a box to size it (ZR: keep shape).  A: options"
