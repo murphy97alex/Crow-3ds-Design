@@ -22,8 +22,10 @@ Stylus in right hand, frequent actions on left.
 - A: tool options panel (drawing tools); confirm/place (select/stamp) | B: toggle eraser
   (deselect in Select, cancel while dragging a shape)
 - ZR (hold while dragging a shape/stamp): snap / keep proportions
-- X: grid toggle | Y: layers menu
-- Select: top screen tools <-> preview | Start: menu
+- X: Frames panel (top screen; was grid toggle, grid moved to View 2026-11-09) | Y: layers menu
+- Select: top screen tools <-> preview (plays the animation) | Start: menu
+- Frames panel: left/right frame (horizontal strip), up/down duration, L/R move frame, Y duplicate,
+  SELECT play, A action list. Bottom touch bar (2+ frames): prev / n of N / next / + / Onion / play.
 - Settings: left-handed mode mirrors layout
 
 ## v1 features
@@ -36,6 +38,10 @@ Stylus in right hand, frequent actions on left.
 
 ## v2 — Sprite animator
 - Frame strip, onion skin, top-screen playback with FPS, PNG sprite sheet (+GIF maybe)
+- **Decided 2026-11-09:** X panel + touch bar; scope = core frames (per-frame durations), tags
+  (forward / reverse / ping-pong), animated GIF export, linked cels; onion skin tinted, 1 before
+  (red) + 1 after (blue) by default (1-3 and opacity in View). Exports: sprite sheet (row / column /
+  grid), PNG per frame, GIF; all frames or one tag. .pxd v4.
 - BUILD RULE FOR v1: project file format must support multiple frames from day one.
 - Out of scope: tweening timelines, bones.
 
@@ -89,13 +95,16 @@ Stylus in right hand, frequent actions on left.
   default, ZR stretch, free rotation with Scale2x/RotSprite-style resampling, crisp option); magic
   wand tolerance + sample all layers; selection Add/Subtract; invert; tap vs drag inside a selection;
   layer thumbnails; movable mirror axis; ZR+stylus pan; eraser line mode; icon background = banner navy.
+- **v0.9.0 (v2 animator, 2026-11-09):** frames panel (X), touch frame bar, onion skin, playback
+  (SELECT / bar), per-frame durations + FPS, tags, linked cels, cel-level undo, sprite sheet / PNG
+  frames / animated GIF export, .pxd v4. Grid toggle moved to View.
 - **Before sharing the repo publicly (shelved 2026-11-09):** Old 3DS support - detect New 3DS;
   on Old 3DS map redo to R+L and the ZR functions (pan, snap, free stretch, 15° rotation) to
   Select + touch or an on-screen modifier toggle; only re-composite the changed area while drawing;
   use the faster rotation for very large selections on Old 3DS. Test on real Old 3DS hardware.
 - **Next (Alex picks):**
   - **Camera mode** (filters → pixel art; shelved for now), **left-handed mode**.
-  - **v2 animator** after layers.
+  - **v2 animator:** done in v0.9.0. Out of scope still: tweening, bones.
 
 ## Open questions
 - `.pxd` details (compression, where saves live on SD) — Claude decides, documents in docs/

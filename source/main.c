@@ -13,6 +13,7 @@
 #include "doc.h"
 #include "gfx.h"
 #include "picker.h"
+#include "anim.h"
 #include "export_png.h"
 #include "import.h"
 #include "pxd.h"
@@ -128,7 +129,7 @@ static int listPos;    // D-pad cursor in the tool list (Mirror is a settings en
 typedef enum {
 	MODE_DRAW, MODE_MENU, MODE_NEW, MODE_OPEN, MODE_CONFIRM, MODE_PICKER, MODE_OPTIONS, MODE_EXPORT, MODE_SHIFT,
 	MODE_LAYERS, MODE_LAYER_ACT, MODE_ANCHOR, MODE_IMPORT, MODE_IMPORT_AS, MODE_COLORS, MODE_RAMP, MODE_ADJUST, MODE_VIEW,
-	MODE_HOME,
+	MODE_HOME, MODE_FRAMES, MODE_FRAME_ACT,
 } Mode;
 typedef enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_EXIT, ACT_OVERWRITE, ACT_IMPORT_PROJECT, ACT_DELETE_GAL } Action;
 
@@ -198,8 +199,31 @@ static int isoGrid;                // 0, 8, 16
 static int autosaveMin = 2;        // 0 = off
 static int viewSel;
 static unsigned autosaveFrames;
+// animation
+static bool onionOn = true;        // onion skin (shown when there are 2+ frames)
+static int onionCount = 1;         // frames before and after
+static int onionPct = 35;          // opacity of the nearest frames
+static bool animDirty = true;      // onion skin / playback need refreshing
+static bool playOn;                // top screen plays the animation
+static int playTag = -1;           // -1 = all frames
+static int playSeq[ANIM_MAX_SEQ], playN, playPos, playShown = -1;
+static u64 playNext;
+static int frameActSel;
+static bool frameThumbOk[DOC_MAX_FRAMES];
+#define FRAME_THUMB_SLOT 16        // frame thumbnails use atlas slots 16..79 (layers use 0..15)
+#define BAR_H 20                   // frame bar at the bottom of the touch screen (2+ frames)
+#define BAR_Y (BOT_H - BAR_H)
+#define PIXEL_BUDGET (24u << 20)   // memory for all frames x layers
 
 static void scan_imports(void);
+static void open_frames(void);
+static bool bar_shown(void);
+static void bar_touch(int x);
+static void update_frames(u32 kDown);
+static void run_frame_action(int a);
+enum { FA_NEW, FA_DUP, FA_DEL, FA_LINK, FA_UNLINK, FA_MS, FA_FPS, FA_TAGNEW, FA_TAGSTART, FA_TAGEND, FA_TAGDIR,
+       FA_TAGNAME, FA_TAGDEL, FA_PLAYTAG, FA_COUNT };
+
 static void import_as(int how);
 static void open_home(bool fromCanvas);
 static void gallery_delete(void);
@@ -576,6 +600,7 @@ static void eyedrop(int cx, int cy)
 static void after_doc_change(void)
 {
 	gfx_canvas_rebuild(&doc);
+	animDirty = true;
 }
 
 static void push_recent(uint32_t c)
@@ -1131,7 +1156,7 @@ static void run_action(Action a)
 enum { MI_BACK, MI_HOME, MI_SAVE, MI_SAVEAS, MI_IMPORT, MI_EXPORT, MI_SIZE, MI_SHIFT, MI_COLORS, MI_VIEW,
        MI_LINKED, MI_EXIT, MENU_COUNT };
 static const char* MENU_ITEMS[MENU_COUNT] = { "Back to canvas", "Home (new / gallery)", "Save", "Save as...",
-                                              "Import PNG...", "Export PNG...", "Canvas size...", "Shift layer (wrap)...",
+                                              "Import PNG...", "Export (PNG / sheet / GIF)...", "Canvas size...", "Shift layer (wrap)...",
                                               "Colors...", "View...", "Linked swatches", "Exit" };
 #define MENU_LINKED MI_LINKED
 
@@ -1143,9 +1168,14 @@ static const ExportSize EXPORT_SIZES[] = {
 	{ 0, 16 }, { 0, 24 }, { 0, 32 }, { 0, 48 }, { 0, 64 }, { 0, 128 }, { 0, 256 },
 };
 #define EXPORT_SIZE_COUNT (int)(sizeof(EXPORT_SIZES) / sizeof(EXPORT_SIZES[0]))
-#define EXPORT_ROWS (EXPORT_SIZE_COUNT + 2)  // "Recommended" row + sizes + "Export" row
+#define EXPORT_HEAD 3                        // format, frames, layout rows
+#define EXPORT_ROWS (EXPORT_HEAD + EXPORT_SIZE_COUNT + 2)  // + "Recommended" + sizes + "Export"
 static bool exportOn[EXPORT_SIZE_COUNT];
 static int exportSel;
+enum { EXF_PNG, EXF_SHEET, EXF_FRAMES, EXF_GIF, EXF_COUNT };
+static const char* EXF_NAMES[EXF_COUNT] = { "PNG (this frame)", "Sprite sheet PNG", "PNG per frame", "Animated GIF" };
+static const char* LAYOUT_NAMES[SHEET_LAYOUT_COUNT] = { "One row", "One column", "Grid" };
+static int exportFmt, exportTag = -1, exportLayout = SHEET_ROW;
 
 static void export_recommended(void)
 {
@@ -1185,6 +1215,15 @@ static bool export_dims_for(const Doc* d, int i, int* w, int* h, bool* even)
 		if (*h < 1) *h = 1;
 		*even = e->fixed % longest == 0;
 	}
+	if (exportFmt != EXF_PNG && !*even) return false;   // animations: whole-number scales only
+	if (exportFmt == EXF_SHEET)
+	{
+		int from, to, cols, rows;
+		anim_range(d, exportTag, &from, &to);
+		anim_sheet_grid(to - from + 1, exportLayout, &cols, &rows);
+		return *w * cols <= PNG_MAX_DIM && *h * rows <= PNG_MAX_DIM;
+	}
+	if (exportFmt == EXF_GIF) return *w <= GIF_MAX_DIM && *h <= GIF_MAX_DIM;
 	return *w <= PNG_MAX_DIM && *h <= PNG_MAX_DIM;
 }
 
@@ -1199,14 +1238,37 @@ static void run_export_doc(const Doc* d, const char* base)
 		int w, h;
 		bool even;
 		if (!exportOn[i] || !export_dims_for(d, i, &w, &h, &even)) continue;
-		char path[200];
-		snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx%d.png", base, w, h);
-		if (png_export(d, d->curFrame, w, h, path)) failed++;
+		char path[256], stem[DOC_NAME_MAX + TAG_NAME_MAX + 2];
+		int scale = w / d->w;
+		if (exportTag >= 0 && exportTag < d->tagCount) snprintf(stem, sizeof(stem), "%s_%s", base, d->tags[exportTag].name);
+		else snprintf(stem, sizeof(stem), "%s", base);
+		const char* err;
+		switch (exportFmt)
+		{
+		case EXF_SHEET:
+			snprintf(path, sizeof(path), EXPORT_DIR "/%s_sheet_%dx.png", stem, scale);
+			err = anim_export_sheet(d, exportTag, exportLayout, scale, path);
+			break;
+		case EXF_FRAMES:
+			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx", stem, scale);
+			err = anim_export_frames(d, exportTag, scale, path);
+			break;
+		case EXF_GIF:
+			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx.gif", stem, scale);
+			err = gif_export(d, exportTag, scale, path);
+			break;
+		default:
+			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx%d.png", base, w, h);
+			err = png_export(d, d->curFrame, w, h, path);
+			break;
+		}
+		if (err) failed++;
 		else done++;
 	}
 	char msg[96];
-	if (failed) snprintf(msg, sizeof(msg), "Exported %d PNG, %d failed", done, failed);
-	else if (done) snprintf(msg, sizeof(msg), "Exported %d PNG to /3ds/pixel-crow/export", done);
+	const char* what = exportFmt == EXF_GIF ? "GIF" : exportFmt == EXF_SHEET ? "sheet" : exportFmt == EXF_FRAMES ? "frame set" : "PNG";
+	if (failed) snprintf(msg, sizeof(msg), "Exported %d %s, %d failed", done, what, failed);
+	else if (done) snprintf(msg, sizeof(msg), "Exported %d %s to /3ds/pixel-crow/export", done, what);
 	else snprintf(msg, sizeof(msg), "No sizes ticked");
 	set_status(msg);
 }
@@ -1328,15 +1390,30 @@ static void update_menus(u32 kDown)
 		}
 		break;
 	case MODE_EXPORT:
+	{
 		list_nav(kDown, &exportSel, EXPORT_ROWS);
 		if (kDown & KEY_B) mode = MODE_MENU;
-		if (kDown & KEY_A)
+		int dir = (kDown & (KEY_DRIGHT | KEY_A)) ? 1 : (kDown & KEY_DLEFT) ? -1 : 0;
+		if (exportSel < EXPORT_HEAD)
 		{
-			if (exportSel == 0) export_recommended();
+			if (!dir) break;
+			if (exportSel == 0) exportFmt = (exportFmt + EXF_COUNT + dir) % EXF_COUNT;
+			else if (exportSel == 1)
+			{
+				int n = doc.tagCount + 1;   // all frames, then each tag
+				exportTag = (exportTag + 1 + n + dir) % n - 1;
+			}
+			else exportLayout = (exportLayout + SHEET_LAYOUT_COUNT + dir) % SHEET_LAYOUT_COUNT;
+		}
+		else if (kDown & KEY_A)
+		{
+			int r = exportSel - EXPORT_HEAD;
+			if (r == 0) export_recommended();
 			else if (exportSel == EXPORT_ROWS - 1) { run_export(); mode = MODE_DRAW; }
-			else exportOn[exportSel - 1] = !exportOn[exportSel - 1];
+			else exportOn[r - 1] = !exportOn[r - 1];
 		}
 		break;
+	}
 	case MODE_CONFIRM:
 		if (kDown & KEY_A) run_action(confirmAction);
 		else if (kDown & KEY_B) mode = confirmBack;
@@ -1712,16 +1789,22 @@ static const char* COLORS_ITEMS[] = { "Color ramp (between two swatches)...", "A
 
 // ---- view -------------------------------------------------------------------------
 
-#define VIEW_ROWS 5
+#define VIEW_ROWS 9
+static const char* VIEW_LABELS[VIEW_ROWS] = { "Pixel grid", "Onion skin", "Onion frames", "Onion opacity", "Flip preview",
+                                              "Tile preview", "HUD grid", "Iso grid", "Autosave" };
 static void view_value(int row, char* out, size_t n)
 {
 	switch (row)
 	{
-	case 0: snprintf(out, n, "%s", flipPreview ? "On" : "Off"); break;
-	case 1: snprintf(out, n, "%s", tilePreview ? "On (3x3)" : "Off"); break;
-	case 2: if (hudGrid) snprintf(out, n, "Every %d px", hudGrid); else snprintf(out, n, "Off"); break;
-	case 3: if (isoGrid) snprintf(out, n, "2:1, %d px", isoGrid); else snprintf(out, n, "Off"); break;
-	case 4: if (autosaveMin) snprintf(out, n, "Every %d min", autosaveMin); else snprintf(out, n, "Off"); break;
+	case 0: snprintf(out, n, "%s", gridOn ? "On" : "Off"); break;
+	case 1: snprintf(out, n, "%s", onionOn ? "On" : "Off"); break;
+	case 2: snprintf(out, n, "%d before, %d after", onionCount, onionCount); break;
+	case 3: snprintf(out, n, "%d%%", onionPct); break;
+	case 4: snprintf(out, n, "%s", flipPreview ? "On" : "Off"); break;
+	case 5: snprintf(out, n, "%s", tilePreview ? "On (3x3)" : "Off"); break;
+	case 6: if (hudGrid) snprintf(out, n, "Every %d px", hudGrid); else snprintf(out, n, "Off"); break;
+	case 7: if (isoGrid) snprintf(out, n, "2:1, %d px", isoGrid); else snprintf(out, n, "Off"); break;
+	case 8: if (autosaveMin) snprintf(out, n, "Every %d min", autosaveMin); else snprintf(out, n, "Off"); break;
 	}
 }
 
@@ -1736,11 +1819,15 @@ static void update_view(u32 kDown)
 	int k;
 	switch (viewSel)
 	{
-	case 0: flipPreview = !flipPreview; break;
-	case 1: tilePreview = !tilePreview; break;
-	case 2: for (k = 0; k < 4 && HUD[k] != hudGrid; k++); hudGrid = HUD[(k + 4 + dir) % 4]; break;
-	case 3: for (k = 0; k < 3 && ISO[k] != isoGrid; k++); isoGrid = ISO[(k + 3 + dir) % 3]; break;
-	case 4: for (k = 0; k < 3 && AUTO[k] != autosaveMin; k++); autosaveMin = AUTO[(k + 3 + dir) % 3]; break;
+	case 0: gridOn = !gridOn; break;
+	case 1: onionOn = !onionOn; animDirty = true; break;
+	case 2: onionCount = (onionCount + 2 + dir) % 3 + 1; animDirty = true; break;
+	case 3: onionPct = onionPct + dir * 5 < 10 ? 10 : onionPct + dir * 5 > 80 ? 80 : onionPct + dir * 5; animDirty = true; break;
+	case 4: flipPreview = !flipPreview; break;
+	case 5: tilePreview = !tilePreview; break;
+	case 6: for (k = 0; k < 4 && HUD[k] != hudGrid; k++); hudGrid = HUD[(k + 4 + dir) % 4]; break;
+	case 7: for (k = 0; k < 3 && ISO[k] != isoGrid; k++); isoGrid = ISO[(k + 3 + dir) % 3]; break;
+	case 8: for (k = 0; k < 3 && AUTO[k] != autosaveMin; k++); autosaveMin = AUTO[(k + 3 + dir) % 3]; break;
 	}
 }
 
@@ -1810,9 +1897,419 @@ static void update_more_menus(u32 kDown, u32 kHeld, touchPosition touch)
 		break;
 	case MODE_ADJUST: update_adjust(kDown); break;
 	case MODE_VIEW: update_view(kDown); break;
+	case MODE_FRAMES: update_frames(kDown); break;
+	case MODE_FRAME_ACT:
+		list_nav(kDown, &frameActSel, FA_COUNT);
+		if (kDown & KEY_B) mode = MODE_FRAMES;
+		if (kDown & KEY_A) { mode = MODE_FRAMES; run_frame_action(frameActSel); }
+		break;
 	default: break;
 	}
 	(void)kHeld;
+}
+
+// ---- frames (animation) ----------------------------------------------------------------
+
+static bool bar_shown(void) { return doc.frameCount > 1 && mode == MODE_DRAW; }
+
+static void play_restart(void)
+{
+	if (playTag >= doc.tagCount) playTag = -1;
+	playN = anim_sequence(&doc, playTag, playSeq);
+	playPos = 0;
+	playNext = osGetTime() + doc_frame_ms(&doc, playSeq[0]);
+	playShown = -1;
+}
+
+static bool anim_playing(void) { return playOn && doc.frameCount > 1 && playShown >= 0; }
+
+static void update_play(void)
+{
+	if (!playOn || doc.frameCount < 2) { playShown = -1; return; }
+	if (playN == 0) play_restart();
+	u64 now = osGetTime();
+	while (now >= playNext)
+	{
+		playPos = (playPos + 1) % playN;
+		playNext += doc_frame_ms(&doc, playSeq[playPos]);
+		if (now > playNext + 500) playNext = now;   // don't race to catch up after a pause
+	}
+	int f = playSeq[playPos];
+	if (f >= doc.frameCount) { play_restart(); f = playSeq[0]; }
+	if (f != playShown) { gfx_play_set(&doc, f); playShown = f; }
+}
+
+// Called once per loop: refresh the onion skin and playback after edits (not mid-stroke).
+static void update_anim(void)
+{
+	if (animDirty && touchTarget == TOUCH_NONE)
+	{
+		if (onionOn && doc.frameCount > 1) gfx_onion_rebuild(&doc, onionCount, onionCount, onionPct * 255 / 100);
+		else gfx_onion_clear();
+		frameThumbOk[doc.curFrame] = false;
+		playN = 0;           // frames or tags may have changed
+		animDirty = false;
+	}
+	update_play();
+}
+
+static void set_frame(int f)
+{
+	if (f < 0 || f >= doc.frameCount || f == doc.curFrame) return;
+	finish_floating();
+	doc.curFrame = f;
+	layerThumbsDirty = true;
+	after_doc_change();
+}
+
+static void frame_thumbs_reset(void) { memset(frameThumbOk, 0, sizeof(frameThumbOk)); }
+
+static void open_frames(void)
+{
+	finish_floating();
+	frame_thumbs_reset();
+	mode = MODE_FRAMES;
+}
+
+// Room for one more frame of every layer?
+static bool frame_fits(void)
+{
+	size_t one = 0;
+	for (int i = 0; i < doc.layerCount; i++)
+		if (!doc.layers[i].isFolder) one += (size_t)doc.w * doc.h;
+	if (doc.frameCount >= DOC_MAX_FRAMES) { set_status("64 frames max"); return false; }
+	if (doc_pixel_bytes(&doc) + one > PIXEL_BUDGET) { set_status("Out of room: fewer layers or a smaller canvas"); return false; }
+	return true;
+}
+
+static void frame_add(bool copy)
+{
+	if (!frame_fits()) return;
+	finish_floating();
+	hist_begin(&doc);
+	if (doc_frame_insert(&doc, doc.curFrame + 1, copy ? doc.curFrame : -1)) { hist_commit(); doc.dirty = true; }
+	else { hist_abort(); set_status("Out of memory"); }
+	frame_thumbs_reset();
+	layerThumbsDirty = true;
+	after_doc_change();
+}
+
+// Tag containing frame f (the last one added wins), or -1.
+static int tag_at(int f)
+{
+	for (int t = doc.tagCount - 1; t >= 0; t--)
+		if (f >= doc.tags[t].from && f <= doc.tags[t].to) return t;
+	return -1;
+}
+
+static const char* DIR_NAMES[TAG_DIR_COUNT] = { "Forward", "Reverse", "Ping-pong" };
+
+
+static void frame_act_label(int a, char* out, size_t n)
+{
+	int t = tag_at(doc.curFrame);
+	switch (a)
+	{
+	case FA_NEW: snprintf(out, n, "New blank frame"); break;
+	case FA_DUP: snprintf(out, n, "Duplicate frame  (Y)"); break;
+	case FA_DEL: snprintf(out, n, "Delete frame"); break;
+	case FA_LINK: snprintf(out, n, "Link layer's cel to previous frame"); break;
+	case FA_UNLINK: snprintf(out, n, "Unlink layer's cel"); break;
+	case FA_MS: snprintf(out, n, "Frame duration... (%d ms)", doc_frame_ms(&doc, doc.curFrame)); break;
+	case FA_FPS: snprintf(out, n, "All frames: set FPS..."); break;
+	case FA_TAGNEW: snprintf(out, n, "New tag starting here"); break;
+	case FA_TAGSTART: snprintf(out, n, "Tag starts here"); break;
+	case FA_TAGEND: snprintf(out, n, "Tag ends here"); break;
+	case FA_TAGDIR: snprintf(out, n, "Tag direction: %s", t >= 0 ? DIR_NAMES[doc.tags[t].dir % TAG_DIR_COUNT] : "-"); break;
+	case FA_TAGNAME: snprintf(out, n, "Rename tag..."); break;
+	case FA_TAGDEL: snprintf(out, n, "Delete tag"); break;
+	case FA_PLAYTAG:
+		if (playTag >= 0 && playTag < doc.tagCount) snprintf(out, n, "Play: tag \"%s\"", doc.tags[playTag].name);
+		else snprintf(out, n, "Play: all frames");
+		break;
+	}
+}
+
+static void run_frame_action(int a)
+{
+	int f = doc.curFrame, t = tag_at(f);
+	bool needTag = a == FA_TAGDIR || a == FA_TAGNAME || a == FA_TAGDEL;
+	if (needTag && t < 0) { set_status("No tag on this frame"); return; }
+	switch (a)
+	{
+	case FA_NEW: frame_add(false); break;
+	case FA_DUP: frame_add(true); break;
+	case FA_DEL:
+		if (doc.frameCount < 2) { set_status("Can't delete the last frame"); break; }
+		finish_floating();
+		hist_begin(&doc);
+		if (doc_frame_delete(&doc, f)) { hist_commit(); doc.dirty = true; } else hist_abort();
+		frame_thumbs_reset();
+		break;
+	case FA_LINK:
+	case FA_UNLINK:
+	{
+		finish_floating();
+		hist_begin(&doc);
+		bool ok = a == FA_LINK ? doc_cel_link_prev(&doc, doc.curLayer, f) : doc_cel_unlink(&doc, doc.curLayer, f);
+		if (ok) { hist_commit(); doc.dirty = true; frame_thumbs_reset(); }
+		else
+		{
+			hist_abort();
+			set_status(a == FA_LINK ? (f == 0 ? "First frame: nothing before it" : "Already linked")
+			                        : "This cel isn't linked");
+		}
+		break;
+	}
+	case FA_MS:
+	{
+		int ms = ask_number("Frame duration in ms (10-9999)", doc_frame_ms(&doc, f), 9999);
+		if (ms) { doc.frameMs[f] = ms < 10 ? 10 : ms; doc.dirty = true; }
+		break;
+	}
+	case FA_FPS:
+	{
+		int fps = ask_number("Frames per second (1-50)", doc.fps ? doc.fps : 8, 50);
+		if (fps)
+		{
+			doc.fps = fps;
+			for (int i = 0; i < DOC_MAX_FRAMES; i++) doc.frameMs[i] = 0;   // 0 = use the FPS
+			doc.dirty = true;
+		}
+		break;
+	}
+	case FA_TAGNEW:
+		if (doc.tagCount >= DOC_MAX_TAGS) { set_status("16 tags max"); break; }
+		t = doc.tagCount++;
+		memset(&doc.tags[t], 0, sizeof(Tag));
+		snprintf(doc.tags[t].name, TAG_NAME_MAX, "tag %d", t + 1);
+		doc.tags[t].from = doc.tags[t].to = (uint8_t)f;
+		doc.dirty = true;
+		set_status("Tag added: go to its last frame, A > Tag ends here");
+		break;
+	case FA_TAGSTART:
+	case FA_TAGEND:
+	{
+		// the nearest tag on that side of this frame
+		int best = -1;
+		for (int k = 0; k < doc.tagCount; k++)
+		{
+			const Tag* T = &doc.tags[k];
+			if (a == FA_TAGEND && T->from <= f && (best < 0 || T->from > doc.tags[best].from)) best = k;
+			if (a == FA_TAGSTART && T->to >= f && (best < 0 || T->to < doc.tags[best].to)) best = k;
+		}
+		if (best < 0) { set_status(a == FA_TAGEND ? "No tag starts before this frame" : "No tag ends after this frame"); break; }
+		if (a == FA_TAGEND) doc.tags[best].to = (uint8_t)f; else doc.tags[best].from = (uint8_t)f;
+		doc.dirty = true;
+		break;
+	}
+	case FA_TAGDIR: doc.tags[t].dir = (doc.tags[t].dir + 1) % TAG_DIR_COUNT; doc.dirty = true; break;
+	case FA_TAGNAME:
+	{
+		char nm[DOC_NAME_MAX];
+		if (ask_text("Tag name", doc.tags[t].name, nm, TAG_NAME_MAX)) { snprintf(doc.tags[t].name, TAG_NAME_MAX, "%.15s", nm); doc.dirty = true; }
+		break;
+	}
+	case FA_TAGDEL:
+		memmove(&doc.tags[t], &doc.tags[t + 1], sizeof(Tag) * (doc.tagCount - t - 1));
+		doc.tagCount--;
+		if (playTag == t) playTag = -1;
+		else if (playTag > t) playTag--;
+		doc.dirty = true;
+		break;
+	case FA_PLAYTAG:
+		// cycle: all frames, then each tag
+		playTag = playTag + 1 >= doc.tagCount ? -1 : playTag + 1;
+		break;
+	}
+	layerThumbsDirty = true;
+	after_doc_change();
+}
+
+static void update_frames(u32 kDown)
+{
+	if (kDown & (KEY_B | KEY_X)) { mode = MODE_DRAW; return; }
+	u32 rep = hidKeysDownRepeat();
+	if (rep & KEY_DLEFT) set_frame(doc.curFrame - 1);
+	if (rep & KEY_DRIGHT) set_frame(doc.curFrame + 1);
+	if (rep & (KEY_DUP | KEY_DDOWN))
+	{
+		int ms = doc_frame_ms(&doc, doc.curFrame) + ((rep & KEY_DUP) ? 10 : -10);
+		doc.frameMs[doc.curFrame] = ms < 10 ? 10 : ms > 9990 ? 9990 : ms;
+		doc.dirty = true;
+		playN = 0;
+	}
+	if (kDown & (KEY_L | KEY_R))
+	{
+		int dir = (kDown & KEY_R) ? 1 : -1;
+		hist_begin(&doc);
+		if (doc_frame_move(&doc, doc.curFrame, dir)) { hist_commit(); doc.dirty = true; frame_thumbs_reset(); after_doc_change(); }
+		else hist_abort();
+	}
+	if (kDown & KEY_Y) run_frame_action(FA_DUP);
+	if (kDown & KEY_SELECT) { playOn = !playOn; playN = 0; }
+	if (kDown & KEY_A) { frameActSel = 0; mode = MODE_FRAME_ACT; }
+}
+
+// Touch bar: [<] n/N [>] [+] [onion] [play]
+static void bar_touch(int x)
+{
+	if (x < 44) set_frame(doc.curFrame - 1);
+	else if (x < 120) open_frames();
+	else if (x < 164) set_frame(doc.curFrame + 1);
+	else if (x < 212) frame_add(true);
+	else if (x < 270) { onionOn = !onionOn; animDirty = true; set_status(onionOn ? "Onion skin on" : "Onion skin off"); }
+	else { playOn = !playOn; playN = 0; }
+}
+
+static void make_frame_thumb(int f)
+{
+	static uint32_t comp[DOC_MAX_W * DOC_MAX_H], th[PXD_THUMB * PXD_THUMB];
+	int w = doc.w, h = doc.h;
+	int up = PXD_THUMB / (w > h ? w : h), tw, tht;
+	if (up >= 1) { tw = w * up; tht = h * up; }
+	else if (w >= h) { tw = PXD_THUMB; tht = h * PXD_THUMB / w; }
+	else { tht = PXD_THUMB; tw = w * PXD_THUMB / h; }
+	if (tw < 1) tw = 1;
+	if (tht < 1) tht = 1;
+	doc_composite(&doc, f, comp);
+	for (int y = 0; y < tht; y++)
+		for (int x = 0; x < tw; x++)
+			th[y * tw + x] = comp[(y * h / tht) * w + x * w / tw];
+	gfx_thumb_set(FRAME_THUMB_SLOT + f, th, tw, tht);
+	frameThumbOk[f] = true;
+}
+
+static void thumb_size(int* tw, int* th)
+{
+	int w = doc.w, h = doc.h;
+	int up = PXD_THUMB / (w > h ? w : h);
+	if (up >= 1) { *tw = w * up; *th = h * up; }
+	else if (w >= h) { *tw = PXD_THUMB; *th = h * PXD_THUMB / w; }
+	else { *th = PXD_THUMB; *tw = w * PXD_THUMB / h; }
+	if (*tw < 1) *tw = 1;
+	if (*th < 1) *th = 1;
+}
+
+static const u32 TAG_COLORS[4] = { 0xFF28AAFF, 0xFFD25AFF, 0xFF64DC78, 0xFFF0B43C };  // ABGR for C2D
+
+static void draw_frames_panel(void)
+{
+	C2D_DrawRectSolid(0, 0, 0.5f, 400, 240, C_PANEL);
+	gfx_text(8, 4, 0.52f, C_TEXT, "Frames");
+	gfx_text(64, 6, 0.38f, C_DIM, "</> frame  Up/Down time  L/R move  Y add  A actions  SELECT play  B close");
+
+	// strip of thumbnails
+	const float cw = 46, cy = 44, cs = 40;
+	int vis = 8, first = doc.curFrame - vis / 2;
+	if (first > doc.frameCount - vis) first = doc.frameCount - vis;
+	if (first < 0) first = 0;
+	float x0 = 16;
+	int built = 0;
+	// tag bars above the cells
+	for (int t = 0; t < doc.tagCount; t++)
+	{
+		const Tag* T = &doc.tags[t];
+		int a = T->from < first ? first : T->from, b = T->to > first + vis - 1 ? first + vis - 1 : T->to;
+		if (a > b) continue;
+		float y = 22 + (t % 2) * 10;
+		float xa = x0 + (a - first) * cw, xb = x0 + (b - first + 1) * cw - 4;
+		C2D_DrawRectSolid(xa, y, 0.5f, xb - xa, 9, TAG_COLORS[t % 4]);
+		gfx_text(xa + 2, y - 1, 0.32f, COL(0x10, 0x10, 0x14), "%s%s", T->name,
+		         T->dir == TAG_REVERSE ? " <" : T->dir == TAG_PINGPONG ? " <>" : "");
+	}
+	int tw, th;
+	thumb_size(&tw, &th);
+	for (int f = first; f < doc.frameCount && f < first + vis; f++)
+	{
+		float x = x0 + (f - first) * cw;
+		bool cur = f == doc.curFrame;
+		C2D_DrawRectSolid(x - 2, cy - 2, 0.5f, cs + 4, cs + 4, cur ? C_ACCENT : C_SEL);
+		if (!frameThumbOk[f] && built < 6) { make_frame_thumb(f); built++; }
+		float sc = fminf(cs / tw, cs / th);
+		if (frameThumbOk[f])
+			gfx_draw_thumb_ex(FRAME_THUMB_SLOT + f, tw, th, x + (cs - tw * sc) / 2, cy + (cs - th * sc) / 2, sc, true);
+		if (f > 0 && doc.layers[doc.curLayer].cels[f] == doc.layers[doc.curLayer].cels[f - 1])
+			C2D_DrawRectSolid(x - 6, cy + cs / 2 - 1, 0.5f, 8, 3, C_ACCENT);   // linked to the previous frame
+		gfx_text(x, cy + cs + 3, 0.4f, cur ? C_ACCENT : C_TEXT, "%d", f + 1);
+		gfx_text(x + 14, cy + cs + 4, 0.34f, C_DIM, "%dms", doc_frame_ms(&doc, f));
+	}
+	if (first > 0) gfx_text(2, cy + 12, 0.5f, C_DIM, "<");
+	if (first + vis < doc.frameCount) gfx_text(388, cy + 12, 0.5f, C_DIM, ">");
+
+	// info + preview
+	float iy = 112;
+	int f = doc.curFrame;
+	int ms = doc_frame_ms(&doc, f);
+	gfx_text(12, iy, 0.46f, C_TEXT, "Frame %d of %d", f + 1, doc.frameCount);
+	gfx_text(12, iy + 16, 0.42f, C_DIM, "Duration %d ms (%.1f fps)", ms, 1000.0f / ms);
+	gfx_text(12, iy + 30, 0.42f, C_DIM, "Layer \"%s\": %s", doc.layers[doc.curLayer].name,
+	         doc_cel_linked(&doc, doc.curLayer, f) ? "linked cel" : "own drawing");
+	int t = tag_at(f);
+	if (t >= 0)
+		gfx_text(12, iy + 44, 0.42f, C_DIM, "Tag \"%s\" %d-%d, %s", doc.tags[t].name, doc.tags[t].from + 1, doc.tags[t].to + 1,
+		         DIR_NAMES[doc.tags[t].dir % TAG_DIR_COUNT]);
+	gfx_text(12, iy + 58, 0.42f, C_DIM, "Onion skin: %s (touch bar or View)", onionOn ? "on" : "off");
+	char pl[48];
+	frame_act_label(FA_PLAYTAG, pl, sizeof(pl));
+	gfx_text(12, iy + 72, 0.42f, playOn ? C_ACCENT : C_DIM, "%s%s", pl, playOn ? "  (playing)" : "  (SELECT)");
+
+	float bx = 236, by = 104, bw = 156, bh = 124;
+	C2D_DrawRectSolid(bx, by, 0.5f, bw, bh, C_BG_BOT);
+	float s = 1;
+	while (doc.w * s * 2 <= bw && doc.h * s * 2 <= bh && s < 4) s *= 2;
+	while (doc.w * s > bw || doc.h * s > bh) s /= 2;
+	float px = floorf(bx + (bw - doc.w * s) / 2), py = floorf(by + (bh - doc.h * s) / 2);
+	if (anim_playing()) gfx_draw_play(&doc, px, py, s, flipPreview);
+	else gfx_draw_canvas_ex(&doc, px, py, s, flipPreview);
+
+	if (statusTimer > 0) gfx_text(12, 222, 0.45f, C_ACCENT, "%s", status);
+
+	if (mode == MODE_FRAME_ACT)
+	{
+		float ax = 120, ay = 16, aw = 272, ah = 220, rh = 14.5f;
+		C2D_DrawRectSolid(ax, ay, 0.5f, aw, ah, COL(0x24, 0x27, 0x30));
+		gfx_rect_outline(ax, ay, aw, ah, 1, C_DIM);
+		for (int a = 0; a < FA_COUNT; a++)
+		{
+			float y = ay + 4 + a * rh;
+			if (a == frameActSel) C2D_DrawRectSolid(ax + 4, y - 1, 0.5f, aw - 8, rh, C_SEL);
+			char lab[64];
+			frame_act_label(a, lab, sizeof(lab));
+			gfx_text(ax + 10, y, 0.42f, a == frameActSel ? C_ACCENT : C_TEXT, "%s", lab);
+			if (a == FA_UNLINK || a == FA_FPS || a == FA_TAGDEL)
+				C2D_DrawRectSolid(ax + 6, y + rh - 1, 0.5f, aw - 12, 1, C_PANEL);
+		}
+	}
+}
+
+static void draw_frame_bar(void)
+{
+	u32 bg = COL(0x22, 0x24, 0x2C), btn = C_SEL, ic = C_TEXT;
+	C2D_DrawRectSolid(0, BAR_Y, 0.5f, BOT_W, BAR_H, bg);
+	float cy = BAR_Y + BAR_H / 2.0f;
+	// prev / next
+	C2D_DrawRectSolid(2, BAR_Y + 2, 0.5f, 40, BAR_H - 4, btn);
+	C2D_DrawTriangle(14, cy, ic, 28, cy - 6, ic, 28, cy + 6, ic, 0.5f);
+	gfx_text(52, BAR_Y + 3, 0.46f, C_TEXT, "%d / %d", doc.curFrame + 1, doc.frameCount);
+	C2D_DrawRectSolid(122, BAR_Y + 2, 0.5f, 40, BAR_H - 4, btn);
+	C2D_DrawTriangle(150, cy, ic, 136, cy - 6, ic, 136, cy + 6, ic, 0.5f);
+	// add (duplicate)
+	C2D_DrawRectSolid(166, BAR_Y + 2, 0.5f, 44, BAR_H - 4, btn);
+	C2D_DrawRectSolid(181, cy - 1, 0.5f, 14, 2, ic);
+	C2D_DrawRectSolid(187, cy - 7, 0.5f, 2, 14, ic);
+	// onion toggle
+	C2D_DrawRectSolid(214, BAR_Y + 2, 0.5f, 54, BAR_H - 4, onionOn ? C_ACCENT : btn);
+	gfx_text(220, BAR_Y + 3, 0.44f, onionOn ? COL(0x10, 0x10, 0x14) : C_TEXT, "Onion");
+	// play / stop
+	C2D_DrawRectSolid(272, BAR_Y + 2, 0.5f, 46, BAR_H - 4, playOn ? C_ACCENT : btn);
+	u32 pc = playOn ? COL(0x10, 0x10, 0x14) : ic;
+	if (playOn)
+	{
+		C2D_DrawRectSolid(287, cy - 6, 0.5f, 5, 12, pc);
+		C2D_DrawRectSolid(297, cy - 6, 0.5f, 5, 12, pc);
+	}
+	else C2D_DrawTriangle(301, cy, pc, 289, cy - 7, pc, 289, cy + 7, pc, 0.5f);
 }
 
 // ---- home screen ---------------------------------------------------------------------
@@ -2269,10 +2766,15 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		optSel = 0;
 		return;
 	}
-	if (kDown & KEY_SELECT) previewMode = !previewMode;
-	if (kDown & KEY_X) gridOn = !gridOn;
+	if (kDown & KEY_SELECT)
+	{
+		previewMode = !previewMode;
+		playOn = previewMode && doc.frameCount > 1;   // the preview plays the animation
+		playN = 0;
+	}
 	if (touchTarget == TOUCH_NONE) // no tool changes mid-stroke
 	{
+		if (kDown & KEY_X) { curve_finish(); open_frames(); return; }
 		if (kDown & KEY_Y) { curve_finish(); open_layers(); return; }
 		if (kDown & (KEY_DUP | KEY_DDOWN))   // tool list is vertical: up/down picks the tool
 		{
@@ -2347,6 +2849,13 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		viewX += cp.dx * speed / zoom();
 		viewY -= cp.dy * speed / zoom();
 		view_clamp();
+	}
+
+	if ((kDown & KEY_TOUCH) && touchTarget == TOUCH_NONE && bar_shown() && touch.py >= BAR_Y)
+	{
+		bar_touch(touch.px);
+		touchTarget = TOUCH_STRIP;   // the rest of this touch does nothing
+		return;
 	}
 
 	bool dropper = (kHeld & KEY_R) || tool == TOOL_EYEDROPPER;
@@ -2930,11 +3439,20 @@ static void draw_bottom(void)
 		                 selOp == SELOP_ADD ? C2D_Color32(120, 255, 120, 255) : C2D_Color32(255, 110, 110, 255));
 	}
 
-	if (mode != MODE_DRAW && mode != MODE_SHIFT && mode != MODE_RAMP && mode != MODE_ADJUST && mode != MODE_LAYERS && !mirrorPanel)
+	if (bar_shown()) draw_frame_bar();
+	if (mode != MODE_DRAW && mode != MODE_SHIFT && mode != MODE_RAMP && mode != MODE_ADJUST && mode != MODE_LAYERS &&
+	    mode != MODE_FRAMES && !mirrorPanel)
 		C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, BOT_H, C2D_Color32(0, 0, 0, 0x90));
 }
 
 // Draws the canvas into a box at the largest scale <= 1:1 that fits, centered.
+// The document for previews: the playing animation, or the current frame.
+static void draw_doc(float x, float y, float s)
+{
+	if (anim_playing()) gfx_draw_play(&doc, x, y, s, flipPreview);
+	else gfx_draw_canvas_ex(&doc, x, y, s, flipPreview);
+}
+
 static void draw_preview_box(float x, float y, float w, float h)
 {
 	float s = 1.0f;
@@ -2946,7 +3464,7 @@ static void draw_preview_box(float x, float y, float w, float h)
 	float px = floorf(x + (w - doc.w * s * t) / 2), py = floorf(y + (h - doc.h * s * t) / 2);
 	for (int j = 0; j < t; j++)
 		for (int i = 0; i < t; i++)
-			gfx_draw_canvas_ex(&doc, px + i * doc.w * s, py + j * doc.h * s, s, flipPreview);
+			draw_doc(px + i * doc.w * s, py + j * doc.h * s, s);
 	if (s < 1.0f)
 		gfx_text(x + 4, y + h - 14, 0.4f, C_DIM, "1:%d", (int)(1 / s));
 }
@@ -2993,6 +3511,8 @@ static void draw_top_tools(void)
 	gfx_text(10, iy, 0.4f, C_DIM, "Canvas %dx%d  Zoom %s  Grid %s", doc.w, doc.h, zoom_label(), gridOn ? "on" : "off");
 	gfx_text(10, iy + 11, 0.4f, CL->locked || !CL->visible ? C_ACCENT : C_DIM, "Layer: %s%s%s  %d%%  (Y)", CL->name,
 	         CL->locked ? " [locked]" : "", CL->visible ? "" : " [hidden]", CL->opacity * 100 / 255);
+	gfx_text(10, iy + 22, 0.4f, C_DIM, "Frame %d/%d  %d ms  (X)", doc.curFrame + 1, doc.frameCount,
+	         doc_frame_ms(&doc, doc.curFrame));
 
 	// true-size preview
 	C2D_DrawRectSolid(196, 28, 0.5f, 198, 180, C_BG_BOT);
@@ -3017,7 +3537,7 @@ static void draw_top_tools(void)
 	else if (is_shape(tool))
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag to draw. Hold ZR to snap, B cancels.");
 	else
-		gfx_text(10, 222, 0.42f, C_DIM, "L undo ZL redo R eyedrop B eraser X grid <> zoom");
+		gfx_text(10, 222, 0.42f, C_DIM, "L undo ZL redo R eyedrop B eraser X frames <> zoom");
 }
 
 static void draw_top_preview(void)
@@ -3047,11 +3567,15 @@ static void draw_top_preview(void)
 	for (int s = 1; s <= n; s++)
 	{
 		float y = floorf((226 - doc.h * s) / 2);
-		gfx_draw_canvas_ex(&doc, x, y, s, flipPreview);
+		draw_doc(x, y, s);
 		gfx_text(x, y + doc.h * s + 2, 0.4f, C_DIM, "%dx", s);
 		x += doc.w * s + gap;
 	}
-	gfx_text(8, 224, 0.42f, C_DIM, "Preview%s   SELECT: back to tools", flipPreview ? " (flipped)" : "");
+	if (anim_playing())
+		gfx_text(8, 224, 0.42f, C_DIM, "Playing frame %d/%d%s   SELECT: back to tools", playShown + 1, doc.frameCount,
+		         flipPreview ? " (flipped)" : "");
+	else
+		gfx_text(8, 224, 0.42f, C_DIM, "Preview%s   SELECT: back to tools", flipPreview ? " (flipped)" : "");
 }
 
 static void draw_list(const char* title, const char* const* items, int count, int sel, const char* empty)
@@ -3078,6 +3602,11 @@ static void draw_top(void)
 	{
 		draw_home_top();
 		if (mode != MODE_CONFIRM) { if (statusTimer > 0) gfx_text(16, 204, 0.45f, C_ACCENT, "%s", status); return; }
+	}
+	else if (mode == MODE_FRAMES || mode == MODE_FRAME_ACT)
+	{
+		draw_frames_panel();
+		return;
 	}
 	else if (previewMode && mode == MODE_DRAW)
 		draw_top_preview();
@@ -3147,19 +3676,39 @@ static void draw_top(void)
 	{
 		C2D_DrawRectSolid(30, 8, 0.5f, 340, 224, C_PANEL);
 		gfx_rect_outline(30, 8, 340, 224, 1, C_DIM);
-		gfx_text(42, 14, 0.55f, C_TEXT, "Export PNG  (frame %d, %dx%d)", doc.curFrame + 1, doc.w, doc.h);
+		if (exportTag >= doc.tagCount) exportTag = -1;
+		gfx_text(42, 14, 0.55f, C_TEXT, "Export  (frame %d of %d, %dx%d)", doc.curFrame + 1, doc.frameCount, doc.w, doc.h);
 		const int visible = 10;
 		int first = exportSel - visible + 2 < 0 ? 0 : exportSel - visible + 2;
 		if (first > EXPORT_ROWS - visible) first = EXPORT_ROWS - visible;
-		for (int r = first; r < first + visible; r++)
+		for (int rr = first; rr < first + visible; rr++)
 		{
-			float y = 36 + (r - first) * 17;
-			if (r == exportSel)
+			float y = 36 + (rr - first) * 17;
+			if (rr == exportSel)
 				C2D_DrawRectSolid(36, y - 2, 0.5f, 328, 16, C_SEL);
-			u32 c = r == exportSel ? C_ACCENT : C_TEXT;
+			u32 c = rr == exportSel ? C_ACCENT : C_TEXT;
+			int r = rr - EXPORT_HEAD;
+			if (rr == 0) { gfx_text(46, y, 0.48f, c, "Format"); gfx_text(150, y, 0.48f, c, "< %s >", EXF_NAMES[exportFmt]); continue; }
+			if (rr == 1)
+			{
+				gfx_text(46, y, 0.48f, exportFmt == EXF_PNG ? C_DIM : c, "Frames");
+				if (exportFmt == EXF_PNG) gfx_text(150, y, 0.48f, C_DIM, "current frame");
+				else if (exportTag >= 0)
+					gfx_text(150, y, 0.48f, c, "< tag \"%s\" %d-%d >", doc.tags[exportTag].name, doc.tags[exportTag].from + 1,
+					         doc.tags[exportTag].to + 1);
+				else gfx_text(150, y, 0.48f, c, "< all (1-%d) >", doc.frameCount);
+				continue;
+			}
+			if (rr == 2)
+			{
+				gfx_text(46, y, 0.48f, exportFmt == EXF_SHEET ? c : C_DIM, "Layout");
+				gfx_text(150, y, 0.48f, exportFmt == EXF_SHEET ? c : C_DIM, exportFmt == EXF_SHEET ? "< %s >" : "%s",
+				         exportFmt == EXF_SHEET ? LAYOUT_NAMES[exportLayout] : "sprite sheets only");
+				continue;
+			}
 			if (r == 0)
 				gfx_text(46, y, 0.48f, c, "%s Recommended  (1x 2x 4x 8x)", export_is_recommended() ? "[x]" : "[  ]");
-			else if (r == EXPORT_ROWS - 1)
+			else if (rr == EXPORT_ROWS - 1)
 				gfx_text(46, y, 0.48f, c, ">> Export now");
 			else
 			{
@@ -3169,10 +3718,10 @@ static void draw_top(void)
 				if (EXPORT_SIZES[i].mult) snprintf(label, sizeof(label), "%dx", EXPORT_SIZES[i].mult);
 				else snprintf(label, sizeof(label), "%d px", EXPORT_SIZES[i].fixed);
 				gfx_text(46, y, 0.48f, c, "%s %-7s %dx%d%s", exportOn[i] ? "[x]" : "[  ]", label, w, h,
-				         !ok ? "  too big" : !even ? "  (uneven pixels)" : "");
+				         !even && exportFmt != EXF_PNG ? "  (PNG only)" : !ok ? "  too big" : !even ? "  (uneven pixels)" : "");
 			}
 		}
-		gfx_text(42, 214, 0.42f, C_DIM, "Up/Down: choose   A: tick / run   B: back");
+		gfx_text(42, 214, 0.42f, C_DIM, "Up/Down: choose   Left/Right: change   A: tick / run   B: back");
 	}
 	else if (mode == MODE_SHIFT)
 	{
@@ -3278,20 +3827,19 @@ static void draw_top(void)
 	}
 	else if (mode == MODE_VIEW)
 	{
-		C2D_DrawRectSolid(50, 50, 0.5f, 300, 150, C_PANEL);
-		gfx_rect_outline(50, 50, 300, 150, 1, C_ACCENT);
-		gfx_text(62, 56, 0.52f, C_TEXT, "View");
-		const char* lab[VIEW_ROWS] = { "Flip preview", "Tile preview", "HUD grid", "Iso grid", "Autosave" };
+		C2D_DrawRectSolid(50, 14, 0.5f, 300, 212, C_PANEL);
+		gfx_rect_outline(50, 14, 300, 212, 1, C_ACCENT);
+		gfx_text(62, 20, 0.52f, C_TEXT, "View");
 		for (int r = 0; r < VIEW_ROWS; r++)
 		{
-			float y = 80 + r * 22;
-			if (r == viewSel) C2D_DrawRectSolid(56, y - 3, 0.5f, 288, 20, C_SEL);
-			gfx_text(66, y, 0.5f, r == viewSel ? C_ACCENT : C_TEXT, "%s", lab[r]);
+			float y = 42 + r * 19;
+			if (r == viewSel) C2D_DrawRectSolid(56, y - 3, 0.5f, 288, 18, C_SEL);
+			gfx_text(66, y, 0.48f, r == viewSel ? C_ACCENT : C_TEXT, "%s", VIEW_LABELS[r]);
 			char v[32];
 			view_value(r, v, sizeof(v));
-			gfx_text(186, y, 0.5f, C_TEXT, "< %s >", v);
+			gfx_text(176, y, 0.48f, C_TEXT, "< %s >", v);
 		}
-		gfx_text(62, 186, 0.42f, C_DIM, "Up/Down: row   Left/Right: change   A/B: close");
+		gfx_text(62, 212, 0.42f, C_DIM, "Up/Down: row   Left/Right: change   A/B: close");
 	}
 	else if (mode == MODE_CONFIRM)
 	{
@@ -3323,6 +3871,7 @@ int main(int argc, char* argv[])
 		if (stat(OLD_SAVE_ROOT, &st) == 0 && stat(SAVE_ROOT, &st) != 0)
 			rename(OLD_SAVE_ROOT, SAVE_ROOT);
 	}
+	hidSetRepeatParameters(24, 5);   // held D-pad repeats (frames panel)
 	view_fit();
 	after_doc_change();
 	export_recommended();
@@ -3428,6 +3977,7 @@ int main(int argc, char* argv[])
 		}
 		else if (!doc.dirty)
 			autosaveFrames = 0;
+		if (mode != MODE_HOME) update_anim();
 		gfx_canvas_flush();
 
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
