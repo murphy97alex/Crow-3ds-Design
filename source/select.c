@@ -7,7 +7,7 @@ static bool active, floating;
 static Rect sel;                    // selection rect, or the floating layer's rect
 static uint8_t base[DOC_MAX_W * DOC_MAX_H]; // frame under the floating layer
 static uint8_t* flt;                // floating pixels (sel.w * sel.h)
-static uint8_t* clip;
+static uint32_t* clip;               // clipboard as RGBA, so it works across projects
 static Mirror floatMirror = MIRROR_OFF;
 
 void sel_set_float_mirror(Mirror m) { floatMirror = m; }
@@ -83,8 +83,6 @@ void sel_reset(void)
 	free(flt);
 	flt = NULL;
 	drop_mask();
-	free(clip);   // pixel values only make sense in the document they came from
-	clip = NULL;
 }
 
 // Composite: frame = base + floating pixels (transparent pixels don't overwrite).
@@ -247,8 +245,13 @@ void sel_copy(Doc* d)
 	uint8_t* p;
 	int w, h;
 	if (!sel_get_pixels(d, &p, &w, &h)) return;
+	uint32_t* c = malloc((size_t)w * h * 4);
+	if (!c) { free(p); return; }
+	for (int i = 0; i < w * h; i++)
+		c[i] = doc_color(d, p[i]);   // 0 = transparent
+	free(p);
 	free(clip);
-	clip = p;
+	clip = c;
 	clipW = w;
 	clipH = h;
 }
@@ -264,8 +267,15 @@ void sel_cut(Doc* d)
 
 void sel_paste(Doc* d, int x, int y)
 {
-	if (clip)
-		sel_float_pixels(d, clip, clipW, clipH, x, y);
+	if (!clip) return;
+	if (floating) sel_commit(d);
+	uint8_t* p = malloc((size_t)clipW * clipH);
+	if (!p) return;
+	// nothing is floating now, so the color table may be compacted to make room
+	for (int i = 0; i < clipW * clipH; i++)
+		p[i] = clip[i] ? doc_color_index(d, clip[i], true) : PIX_TRANSPARENT;
+	sel_float_pixels(d, p, clipW, clipH, x, y);
+	free(p);
 }
 
 void sel_delete(Doc* d)

@@ -8,6 +8,8 @@
 static Doc d;
 static int count(uint8_t v) { int n = 0; for (int i = 0; i < d.w * d.h; i++) n += doc_pixels(&d)[i] == v; return n; }
 static uint8_t at(int x, int y) { return doc_get(&d, x, y); }
+static bool right_half(int x, int y) { (void)y; return x >= 2; }
+
 int main(void)
 {
 	Brush b1 = { 1, BRUSH_SQUARE, false };
@@ -108,6 +110,14 @@ int main(void)
 	tools_begin(&d, MIRROR_OFF);
 	tools_gradient_fill(0, 0, 0, 0, 5);
 	assert(at(0, 0) == 5 && at(3, 0) == 7 && at(5, 0) == 0);
+
+	// clipping to a selection: only x >= 2 may change
+	doc_new(&d, 5, 1);
+	tools_begin(&d, MIRROR_OFF);
+	tools_set_clip(right_half);
+	tools_line(0, 0, 4, 0, 6, &b1);
+	tools_set_clip(NULL);
+	assert(at(0, 0) == 0 && at(1, 0) == 0 && at(2, 0) == 6 && at(4, 0) == 6);
 
 	doc_free(&d);
 	hist_clear();

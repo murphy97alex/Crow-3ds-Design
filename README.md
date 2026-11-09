@@ -12,7 +12,7 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 | Hold R + tap a swatch | Save the current color (e.g. from the eyedropper) into that swatch |
 | A | Tool options (size 1–9, brush Square/Round/Dither, pixel-perfect, outline/filled, fill mode, mirror axis) |
 | D-pad up/down | Previous / next tool: Pencil, Eraser, Fill, Shade, Line, Rectangle, Ellipse, Select, Stamp, Eyedropper. Last entry **Mirror** opens Mirror On/Off + axis, which applies to all drawing tools and stamps |
-| Select tool | Mode (A): Rectangle, Magic wand (connected or all of a color), Lasso. Drag inside a selection to move it. A = actions (copy, cut, paste, delete, flip, rotate, outline, crop canvas to selection, save as stamp); B deselects |
+| Select tool | Mode (A): Rectangle, Magic wand (connected or all of a color), Lasso. Drag inside a selection to move it. The selection stays when you switch tools, and drawing tools then only paint inside it. Copy/paste work across projects. A = actions (copy, cut, paste, delete, flip, rotate, outline, crop canvas to selection, save as stamp); B deselects |
 | Fill tool | Mode (A): Connected area, Replace color, or Gradient: drag to fade the current color into the area with a 4x4 dither |
 | Shade tool | Paint over pixels to step them one swatch lighter (right) or darker (left); A sets direction and brush |
 | Stamp tool | A: pick a stamp, Size Original or Drag to size. Original: touch to place, drag to position. Drag to size: drag a box to scale it (ZR keeps proportions); a tap places it at original size |

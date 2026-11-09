@@ -10,6 +10,9 @@ static bool changed;
 static uint8_t orig[DOC_MAX_W * DOC_MAX_H];
 static uint8_t mask[DOC_MAX_W * DOC_MAX_H], mask2[DOC_MAX_W * DOC_MAX_H];
 static const uint8_t* valueMap;
+static bool (*clipFn)(int x, int y);
+
+void tools_set_clip(bool (*inside)(int x, int y)) { clipFn = inside; }
 
 void tools_set_value_map(const uint8_t* map) { valueMap = map; }
 
@@ -36,6 +39,8 @@ bool tools_changed(void)
 static void set1(int x, int y, uint8_t v)
 {
 	if (x < 0 || y < 0 || x >= doc->w || y >= doc->h)
+		return;
+	if (clipFn && !clipFn(x, y))
 		return;
 	if (valueMap)
 		v = valueMap[orig[y * doc->w + x]];

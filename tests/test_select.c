@@ -15,6 +15,8 @@ static int count(uint8_t v) { int n = 0; for (int i = 0; i < d.w * d.h; i++) n +
 int main(void)
 {
 	doc_new(&d, 8, 6);
+	d.colorCount = 10;                     // values 1..10 are real, distinct colors
+	for (int i = 1; i <= 10; i++) d.colors[i] = 0x10203000u * i | 0xFF;
 	// 2x1 bar of color 1 at (1,1),(2,1); color 2 at (1,2)
 	doc_pixels(&d)[1 * 8 + 1] = 1; doc_pixels(&d)[1 * 8 + 2] = 1; doc_pixels(&d)[2 * 8 + 1] = 2;
 
@@ -92,6 +94,27 @@ int main(void)
 		sel_float_pixels(&d, b, 1, 1, 0, 0);   // mirror resets after commit
 		assert(count(3) == 1);
 		sel_cancel(&d);
+	}
+
+	// clipboard survives switching documents and keeps exact colors
+	{
+		Doc a = {0}, b = {0};
+		doc_new(&a, 3, 1);
+		uint8_t red = doc_color_index(&a, 0xFF0000FF, true);
+		a.layers[0].cels[0][1] = red;
+		sel_reset();
+		sel_set(&a, 0, 0, 2, 0);
+		sel_copy(&a);
+		sel_clear(&a);
+		sel_reset();                       // e.g. opening another project
+		doc_new(&b, 4, 1);
+		doc_color_index(&b, 0x00FF00FF, true);
+		sel_paste(&b, 1, 0);
+		sel_commit(&b);
+		assert(doc_color(&b, b.layers[0].cels[0][2]) == 0xFF0000FF && b.layers[0].cels[0][1] == 0);
+		sel_reset();
+		doc_free(&a);
+		doc_free(&b);
 	}
 
 	// magic wand: connected vs all of color; moving keeps the shape

@@ -37,6 +37,9 @@ void tools_gradient_fill(int x0, int y0, int x1, int y1, uint8_t v);
 // (used by the shading tool). Pass NULL to turn off.
 void tools_set_value_map(const uint8_t* map);
 
+// While set, drawing only changes pixels for which inside(x, y) is true (the selection).
+void tools_set_clip(bool (*inside)(int x, int y));
+
 // Snapping helpers (adjust the end point)
 void tools_snap_line(int x0, int y0, int* x1, int* y1);   // 0/45/90° and 2:1 slopes
 void tools_snap_square(int x0, int y0, int* x1, int* y1);

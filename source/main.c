@@ -264,9 +264,11 @@ static void set_tool(Tool t)
 {
 	if (t == tool)
 		return;
-	if (tool == TOOL_SELECT || tool == TOOL_STAMP)
+	if (tool == TOOL_SELECT)
+		finish_floating();          // the selection itself stays, like other editors
+	if (tool == TOOL_STAMP || t == TOOL_STAMP)
 	{
-		sel_clear(&doc);
+		sel_clear(&doc);            // stamps place through the floating layer
 		after_doc_change();
 	}
 	if (t == TOOL_STAMP)
@@ -1046,7 +1048,6 @@ static void run_layer_action(int a)
 			set_status(why[a]);
 		}
 	}
-	sel_clear(&doc);
 	after_doc_change();
 }
 
@@ -1481,13 +1482,15 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	{
 		if (kDown & KEY_L)
 		{
+			int ow = doc.w, oh = doc.h;
 			if (sel_floating()) sel_cancel(&doc);   // undo a move/paste in progress
-			else if (hist_undo(&doc)) sel_clear(&doc);
+			else if (hist_undo(&doc) && (doc.w != ow || doc.h != oh)) sel_clear(&doc);
 			after_doc_change();
 		}
+		int rw = doc.w, rh = doc.h;
 		if ((kDown & KEY_ZL) && !sel_floating() && hist_redo(&doc))
 		{
-			sel_clear(&doc);
+			if (doc.w != rw || doc.h != rh) sel_clear(&doc);
 			after_doc_change();
 		}
 		if (kDown & KEY_B)
@@ -1711,6 +1714,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				}
 				hist_begin(&doc);
 				tools_begin(&doc, mirrorOn ? mirrorMode : MIRROR_OFF);
+				tools_set_clip(sel_active() ? sel_contains : NULL);   // paint inside the selection only
 				strokeActive = true;
 				if (tool == TOOL_FILL && fillMode != FILL_GRADIENT)
 					tools_fill(cx, cy, strokeValue, fillMode == FILL_REPLACE);
@@ -1743,6 +1747,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				// cancel the shape
 				tools_restore();
 				hist_abort();
+				tools_set_clip(NULL);
 				strokeActive = false;
 				touchTarget = TOUCH_STRIP; // ignore the rest of this touch
 			}
@@ -1786,6 +1791,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			else
 				hist_abort();
 			tools_set_value_map(NULL);
+			tools_set_clip(NULL);
 			after_doc_change();
 		}
 		if (touchTarget == TOUCH_CANVAS && tool == TOOL_EYEDROPPER && !(kHeld & KEY_R))
