@@ -3,10 +3,13 @@
 #pragma once
 #include "doc.h"
 
-#define IMPORT_MAX_DIM 4096
+#define IMPORT_MAX_DIM 16384
 
-// Reads a PNG as straight RGBA (0xRRGGBBAA per pixel). NULL on success, else an error.
-const char* import_read_png(const char* path, uint32_t** rgba, int* w, int* h);
+// Reads a PNG as straight RGBA (0xRRGGBBAA per pixel), shrunk with nearest-neighbor while
+// decoding so it fits in maxW x maxH (never enlarged). Reads one row at a time, so even very
+// large images need little memory. *shrunk tells whether it was made smaller.
+// NULL on success, else an error.
+const char* import_read_png(const char* path, int maxW, int maxH, uint32_t** rgba, int* w, int* h, bool* shrunk);
 
 // Nearest-neighbor shrink so the image fits in maxW x maxH (keeps proportions). Never enlarges.
 // Replaces *rgba/*w/*h. Returns false on out of memory.

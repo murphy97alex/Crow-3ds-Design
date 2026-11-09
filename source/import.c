@@ -1,41 +1,112 @@
 // SPDX-License-Identifier: MIT
 #include "import.h"
 #include <png.h>
+#include <setjmp.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-const char* import_read_png(const char* path, uint32_t** rgba, int* w, int* h)
+static void fit_size(int w, int h, int maxW, int maxH, int* nw, int* nh)
 {
-	png_image img;
-	memset(&img, 0, sizeof(img));
-	img.version = PNG_IMAGE_VERSION;
-	if (!png_image_begin_read_from_file(&img, path))
-		return "Not a readable PNG";
-	if (img.width < 1 || img.height < 1 || img.width > IMPORT_MAX_DIM || img.height > IMPORT_MAX_DIM)
+	*nw = w;
+	*nh = h;
+	if (w <= maxW && h <= maxH) return;
+	float s = (float)maxW / w;
+	if ((float)maxH / h < s) s = (float)maxH / h;
+	*nw = (int)(w * s);
+	*nh = (int)(h * s);
+	if (*nw < 1) *nw = 1;
+	if (*nh < 1) *nh = 1;
+}
+
+static void sample_row(const uint8_t* src, int w, uint32_t* dst, int nw)
+{
+	for (int x = 0; x < nw; x++)
 	{
-		png_image_free(&img);
-		return "Image too large";
+		const uint8_t* p = src + (size_t)(x * (long)w / nw) * 4;
+		dst[x] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 	}
-	img.format = PNG_FORMAT_RGBA;
-	uint8_t* buf = malloc(PNG_IMAGE_SIZE(img));
-	if (!buf) { png_image_free(&img); return "Out of memory"; }
-	if (!png_image_finish_read(&img, NULL, buf, 0, NULL))
+}
+
+const char* import_read_png(const char* path, int maxW, int maxH, uint32_t** rgba, int* w, int* h, bool* shrunk)
+{
+	FILE* fp = fopen(path, "rb");
+	if (!fp) return "Can't open file";
+	uint8_t sig[8];
+	if (fread(sig, 1, 8, fp) != 8 || png_sig_cmp(sig, 0, 8)) { fclose(fp); return "Not a PNG"; }
+
+	png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+	png_infop info = png ? png_create_info_struct(png) : NULL;
+	if (!info) { png_destroy_read_struct(&png, NULL, NULL); fclose(fp); return "Out of memory"; }
+
+	uint8_t* volatile row = NULL;      // one decoded row (or the whole image if interlaced)
+	uint32_t* volatile out = NULL;
+	const char* volatile err = NULL;
+	if (setjmp(png_jmpbuf(png)))
 	{
-		free(buf);
-		return "Couldn't decode PNG";
+		png_destroy_read_struct(&png, &info, NULL);
+		fclose(fp);
+		free(row);
+		free(out);
+		return err ? err : "Couldn't decode PNG";
 	}
-	size_t n = (size_t)img.width * img.height;
-	uint32_t* out = malloc(n * 4);
-	if (!out) { free(buf); return "Out of memory"; }
-	for (size_t i = 0; i < n; i++)
+	png_init_io(png, fp);
+	png_set_sig_bytes(png, 8);
+	png_read_info(png, info);
+	int sw = png_get_image_width(png, info), sh = png_get_image_height(png, info);
+	if (sw < 1 || sh < 1 || sw > IMPORT_MAX_DIM || sh > IMPORT_MAX_DIM)
 	{
-		const uint8_t* p = buf + i * 4;
-		out[i] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+		err = "Image too large (16384 px max)";
+		png_error(png, "size");
 	}
-	free(buf);
+	int ct = png_get_color_type(png, info);
+	png_set_expand(png);                       // palette/low-bit gray -> 8 bit, tRNS -> alpha
+	png_set_strip_16(png);
+	if (!(ct & PNG_COLOR_MASK_COLOR)) png_set_gray_to_rgb(png);
+	if (!(ct & PNG_COLOR_MASK_ALPHA) && !png_get_valid(png, info, PNG_INFO_tRNS))
+		png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
+	int passes = png_set_interlace_handling(png);
+	png_read_update_info(png, info);
+	size_t rowBytes = png_get_rowbytes(png, info);
+	if (rowBytes != (size_t)sw * 4) { err = "Unsupported PNG format"; png_error(png, "format"); }
+
+	int nw, nh;
+	fit_size(sw, sh, maxW, maxH, &nw, &nh);
+	out = malloc((size_t)nw * nh * 4);
+	if (!out) { err = "Out of memory"; png_error(png, "oom"); }
+
+	if (passes == 1)
+	{
+		row = malloc(rowBytes);
+		if (!row) { err = "Out of memory"; png_error(png, "oom"); }
+		int yo = 0;
+		for (int y = 0; y < sh && yo < nh; y++)
+		{
+			png_read_row(png, row, NULL);
+			while (yo < nh && (int)((long)yo * sh / nh) == y)
+				sample_row(row, sw, out + (size_t)yo++ * nw, nw);
+		}
+	}
+	else
+	{
+		// interlaced PNGs need the whole image in memory
+		row = malloc(rowBytes * sh);
+		if (!row) { err = "Out of memory (interlaced PNG - save it non-interlaced)"; png_error(png, "oom"); }
+		png_bytep* rows = malloc(sizeof(png_bytep) * sh);
+		if (!rows) { err = "Out of memory"; png_error(png, "oom"); }
+		for (int y = 0; y < sh; y++) rows[y] = row + rowBytes * y;
+		png_read_image(png, rows);
+		free(rows);
+		for (int yo = 0; yo < nh; yo++)
+			sample_row(row + rowBytes * (size_t)((long)yo * sh / nh), sw, out + (size_t)yo * nw, nw);
+	}
+	png_destroy_read_struct(&png, &info, NULL);
+	fclose(fp);
+	free(row);
 	*rgba = out;
-	*w = img.width;
-	*h = img.height;
+	*w = nw;
+	*h = nh;
+	if (shrunk) *shrunk = nw != sw || nh != sh;
 	return NULL;
 }
 

@@ -1102,7 +1102,10 @@ static void import_as(int how)
 	snprintf(path, sizeof(path), IMPORT_DIR "/%s", importFiles[importSel]);
 	uint32_t* rgba;
 	int w, h;
-	const char* err = import_read_png(path, &rgba, &w, &h);
+	bool shrunk = false;
+	// shrink while reading: big images never sit in memory at full size
+	int maxW = how == 1 ? doc.w : DOC_MAX_W, maxH = how == 1 ? doc.h : DOC_MAX_H;
+	const char* err = import_read_png(path, maxW, maxH, &rgba, &w, &h, &shrunk);
 	if (err) { set_status(err); return; }
 	char base[DOC_NAME_MAX];
 	snprintf(base, sizeof(base), "%s", importFiles[importSel]);
@@ -1110,7 +1113,6 @@ static void import_as(int how)
 	if (dot) *dot = 0;
 	for (char* c = base; *c; c++)
 		if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '-')) *c = '_';
-	bool shrunk = false;
 	if (how == 3)
 	{
 		uint32_t cols[DOC_PALETTE_SIZE];
@@ -1123,8 +1125,6 @@ static void import_as(int how)
 	}
 	else if (how == 0)
 	{
-		shrunk = w > DOC_MAX_W || h > DOC_MAX_H;
-		if (import_fit(&rgba, &w, &h, DOC_MAX_W, DOC_MAX_H))
 		{
 			sel_reset();
 			doc_new(&doc, w, h);
@@ -1139,10 +1139,9 @@ static void import_as(int how)
 	}
 	else if (how == 1)
 	{
-		shrunk = w > doc.w || h > doc.h;
 		hist_begin(&doc);
 		int li = doc_layer_add(&doc, false);
-		if (li >= 0 && import_fit(&rgba, &w, &h, doc.w, doc.h))
+		if (li >= 0)
 		{
 			uint8_t* px = import_to_indexed(&doc, rgba, w, h);
 			if (px)
@@ -1160,9 +1159,8 @@ static void import_as(int how)
 	}
 	else
 	{
-		shrunk = w > DOC_MAX_W || h > DOC_MAX_H;
 		Doc tmp = {0};   // built by hand: doc_new() would reset the undo history
-		if (import_fit(&rgba, &w, &h, DOC_MAX_W, DOC_MAX_H) && (tmp.layers[0].cels[0] = calloc((size_t)w * h, 1)))
+		if ((tmp.layers[0].cels[0] = calloc((size_t)w * h, 1)))
 		{
 			tmp.w = w;
 			tmp.h = h;
