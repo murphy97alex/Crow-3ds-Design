@@ -2135,29 +2135,41 @@ static void draw_top(void)
 	{
 		OptKind rows[OPT_MAX_ROWS];
 		int n = opt_rows(optTool, rows);
-		float rh = n > 6 ? 15 : 22, top = n > 6 ? 8 : 40;
-		float ph = 36 + n * rh + 22;
+		// show at most 9 rows; scroll to keep the cursor visible
+		const int maxVis = 9;
+		int vis = n < maxVis ? n : maxVis;
+		int first = optSel - vis / 2;
+		if (first > n - vis) first = n - vis;
+		if (first < 0) first = 0;
+		float rh = 20, ph = 34 + vis * rh + 22, top = floorf((240 - ph) / 2);
 		C2D_DrawRectSolid(40, top, 0.5f, 320, ph, C_PANEL);
 		gfx_rect_outline(40, top, 320, ph, 1, C_ACCENT);
 		gfx_text(52, top + 6, 0.55f, C_TEXT, "%s %s", TOOL_NAMES[optTool], optTool == TOOL_SELECT ? "actions" : "options");
+		if (n > vis)
+			gfx_text(300, top + 8, 0.42f, C_DIM, "%d/%d", optSel + 1, n);
 		bool anyAction = false;
-		for (int i = 0; i < n; i++)
+		for (int k = 0; k < n; k++) anyAction |= rows[k] >= OPT_ACT_FIRST;
+		for (int r = 0; r < vis; r++)
 		{
-			float y = top + 30 + i * rh;
-			bool act = rows[i] >= OPT_ACT_FIRST;
-			anyAction |= act;
-			if (i == optSel)
-				C2D_DrawRectSolid(46, y - 2, 0.5f, 308, rh - 1, C_SEL);
-			gfx_text(56, y, rh < 20 ? 0.46f : 0.52f, i == optSel ? C_ACCENT : C_TEXT, "%s", opt_label(rows[i]));
+			int i2 = first + r;
+			float y = top + 30 + r * rh;
+			bool act = rows[i2] >= OPT_ACT_FIRST;
+			if (i2 == optSel)
+				C2D_DrawRectSolid(46, y - 3, 0.5f, 308, rh - 1, C_SEL);
+			gfx_text(56, y, 0.5f, i2 == optSel ? C_ACCENT : C_TEXT, "%s", opt_label(rows[i2]));
 			if (!act)
 			{
 				char val[64];
-				opt_value(rows[i], val, sizeof(val));
-				gfx_text(176, y, 0.52f, C_TEXT, "< %s >", val);
+				opt_value(rows[i2], val, sizeof(val));
+				gfx_text(176, y, 0.5f, C_TEXT, "< %s >", val);
 			}
 		}
-		gfx_text(52, top + 30 + n * rh + 4, 0.42f, C_DIM, anyAction ? "Up/Down: choose   A: do it   B: close"
-		                                                               : "Up/Down: option   Left/Right: change   A/B: close");
+		if (first > 0)
+			gfx_text(340, top + 30, 0.45f, C_DIM, "\xE2\x96\xB2");
+		if (first + vis < n)
+			gfx_text(340, top + 30 + (vis - 1) * rh, 0.45f, C_DIM, "\xE2\x96\xBC");
+		gfx_text(52, top + 30 + vis * rh + 4, 0.42f, C_DIM, anyAction ? "Up/Down: choose   A: do it / close   B: close"
+		                                                                : "Up/Down: option   Left/Right: change   A/B: close");
 	}
 	else if (mode == MODE_EXPORT)
 	{
