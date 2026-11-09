@@ -19,7 +19,7 @@ APP_PRODUCT_CODE := CTR-H-PXUI
 APP_UNIQUE_ID   := 0xC7A30
 APP_VERSION_MAJOR := 0
 APP_VERSION_MINOR := 4
-APP_VERSION_MICRO := 2
+APP_VERSION_MICRO := 1
 
 #---------------------------------------------------------------------------------
 TARGET      := pixel-ui-designer
