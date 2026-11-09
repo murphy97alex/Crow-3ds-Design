@@ -18,6 +18,7 @@
 #include "pxd.h"
 #include "select.h"
 #include "stamps.h"
+#include "text.h"
 #include "tools.h"
 
 #define APP_NAME "Pixel UI Designer"
@@ -51,8 +52,8 @@
 
 // ---- tools -----------------------------------------------------------------
 
-typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_SHADE, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_EYEDROPPER, TOOL_MIRROR, TOOL_COUNT } Tool;
-static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Shade", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Eyedropper", "Mirror" };
+typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_FILL, TOOL_SHADE, TOOL_LINE, TOOL_RECT, TOOL_ELLIPSE, TOOL_SELECT, TOOL_STAMP, TOOL_TEXT, TOOL_EYEDROPPER, TOOL_MIRROR, TOOL_COUNT } Tool;
+static const char* TOOL_NAMES[TOOL_COUNT] = { "Pencil", "Eraser", "Fill", "Shade", "Line", "Rectangle", "Ellipse", "Select", "Stamp", "Text", "Eyedropper", "Mirror" };
 
 static bool is_shape(Tool t) { return t == TOOL_LINE || t == TOOL_RECT || t == TOOL_ELLIPSE; }
 
@@ -76,6 +77,11 @@ static const char* SELMODE_NAMES[SELMODE_COUNT] = { "Rectangle", "Magic wand", "
 static Mirror mirrorMode = MIRROR_X;   // axis for the Mirror tool
 static bool mirrorOn = false;          // applies to every drawing tool
 static bool stampDragSize;             // Stamp: false = original size, true = drag to size
+// Text tool
+static int textFont = 4, textScale = 1, textSpacing = 0, textOutline = -1;  // outline: swatch index or -1
+static char textStr[TEXT_MAX];
+static bool textOn;                    // floating text waiting to be placed
+static bool textMoved;
 
 static const char* SHAPE_NAMES[BRUSH_SHAPE_COUNT] = { "Square", "Round", "Dither" };
 static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bottom", "Both" };
@@ -83,10 +89,10 @@ static const char* MIRROR_NAMES[MIRROR_COUNT] = { "Off", "Left-right", "Top-bott
 // options panel rows
 typedef enum {
 	OPT_SIZE, OPT_SHAPE, OPT_PIXPERF, OPT_STYLE, OPT_FILLMODE, OPT_MIRROR, OPT_MIRRORON, OPT_STAMP, OPT_STAMPSIZE,
-	OPT_SHADEDIR, OPT_SELMODE, OPT_WANDALL,
+	OPT_SHADEDIR, OPT_SELMODE, OPT_WANDALL, OPT_FONT, OPT_TSCALE, OPT_TSPACING, OPT_TOUTLINE,
 	// actions (A runs them)
 	OPT_ACT_FIRST, OPT_SELALL = OPT_ACT_FIRST, OPT_DESELECT, OPT_COPY, OPT_CUT, OPT_PASTE, OPT_DELETE,
-	OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_SAVESTAMP, OPT_CROP,
+	OPT_FLIPH, OPT_FLIPV, OPT_ROTATE, OPT_OUTLINE, OPT_SAVESTAMP, OPT_CROP, OPT_TEXTEDIT, OPT_TEXTPLACE,
 } OptKind;
 #define OPT_MAX_ROWS 16
 
@@ -260,13 +266,88 @@ static void finish_floating(void)
 	}
 }
 
+// ---- text tool ---------------------------------------------------------------------
+
+static void push_recent(uint32_t c);
+
+static bool ask_multiline(const char* hint, char* buf, size_t n)
+{
+	SwkbdState kb;
+	static char out[TEXT_MAX];
+	memset(out, 0, sizeof(out));
+	swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, n - 1);
+	swkbdSetFeatures(&kb, SWKBD_MULTILINE);
+	swkbdSetHintText(&kb, hint);
+	swkbdSetInitialText(&kb, buf);
+	if (swkbdInputText(&kb, out, sizeof(out)) != SWKBD_BUTTON_CONFIRM)
+		return false;
+	snprintf(buf, n, "%s", out);
+	return buf[0] != 0;
+}
+
+static uint8_t* render_text(bool allowCompact, int* w, int* h)
+{
+	uint8_t fg = doc_color_index(&doc, curColor, allowCompact);
+	uint8_t ol = textOutline >= 0 ? doc_color_index(&doc, doc.swatches[textOutline], false) : 0;
+	return text_render(&FONTS[textFont], textStr, textScale, textSpacing, fg, ol, w, h);
+}
+
+// Re-render floating text after its options or color changed (keeps its position).
+static void text_refresh(void)
+{
+	if (!textOn || !sel_floating()) return;
+	int w, h;
+	uint8_t* px = render_text(false, &w, &h);
+	if (!px) return;
+	Rect r = sel_rect();
+	sel_float_replace(&doc, px, w, h, r.x, r.y);
+	free(px);
+	after_doc_change();
+}
+
+static void text_place(void)
+{
+	if (!textOn) return;
+	if (sel_floating())
+	{
+		sel_commit(&doc);
+		sel_clear(&doc);
+		push_recent(curColor);
+	}
+	textOn = false;
+	after_doc_change();
+}
+
+static void text_start(int x, int y)
+{
+	if (!ask_multiline("Type text (new lines are OK)", textStr, sizeof(textStr)))
+		return;
+	int w, h;
+	uint8_t* px = render_text(true, &w, &h);   // nothing floats yet, compaction is safe
+	if (!px) return;
+	sel_float_pixels(&doc, px, w, h, x, y);
+	sel_set_float_mirror(mirrorOn ? mirrorMode : MIRROR_OFF);
+	free(px);
+	textOn = true;
+	set_status("Drag to move, tap it to edit, B or tap outside to place");
+	after_doc_change();
+}
+
+static void text_edit(void)
+{
+	if (textOn && ask_multiline("Edit text", textStr, sizeof(textStr)))
+		text_refresh();
+}
+
 static void set_tool(Tool t)
 {
 	if (t == tool)
 		return;
 	if (tool == TOOL_SELECT)
 		finish_floating();          // the selection itself stays, like other editors
-	if (tool == TOOL_STAMP || t == TOOL_STAMP)
+	if (tool == TOOL_TEXT)
+		text_place();
+	if (tool == TOOL_STAMP || t == TOOL_STAMP || t == TOOL_TEXT)
 	{
 		sel_clear(&doc);            // stamps place through the floating layer
 		after_doc_change();
@@ -378,6 +459,10 @@ static int opt_rows(Tool t, OptKind* rows)
 	case TOOL_STAMP:
 		rows[n++] = OPT_STAMP; rows[n++] = OPT_STAMPSIZE;
 		return n;
+	case TOOL_TEXT:
+		rows[n++] = OPT_FONT; rows[n++] = OPT_TSCALE; rows[n++] = OPT_TSPACING; rows[n++] = OPT_TOUTLINE;
+		rows[n++] = OPT_TEXTEDIT; rows[n++] = OPT_TEXTPLACE;
+		return n;
 	default:
 		break;
 	}
@@ -412,6 +497,12 @@ static const char* opt_label(OptKind k)
 	case OPT_SHADEDIR: return "Direction";
 	case OPT_SELMODE: return "Mode";
 	case OPT_WANDALL: return "Wand";
+	case OPT_FONT: return "Font";
+	case OPT_TSCALE: return "Size";
+	case OPT_TSPACING: return "Spacing";
+	case OPT_TOUTLINE: return "Outline";
+	case OPT_TEXTEDIT: return "Edit text...";
+	case OPT_TEXTPLACE: return "Place text";
 	}
 	return "";
 }
@@ -429,6 +520,13 @@ static void opt_value(OptKind k, char* out, size_t n)
 	case OPT_SHADEDIR: snprintf(out, n, "%s", shadeDarker ? "Darker (swatch to the left)" : "Lighter (swatch to the right)"); break;
 	case OPT_SELMODE: snprintf(out, n, "%s", SELMODE_NAMES[selMode]); break;
 	case OPT_WANDALL: snprintf(out, n, "%s", wandAll ? "All of that color" : "Connected only"); break;
+	case OPT_FONT: snprintf(out, n, "%s", FONTS[textFont].name); break;
+	case OPT_TSCALE: snprintf(out, n, "%dx", textScale); break;
+	case OPT_TSPACING: snprintf(out, n, "%+d px", textSpacing); break;
+	case OPT_TOUTLINE:
+		if (textOutline < 0) snprintf(out, n, "Off");
+		else snprintf(out, n, "Swatch %d #%06lX", textOutline + 1, (unsigned long)(doc.swatches[textOutline] >> 8));
+		break;
 	case OPT_MIRROR: snprintf(out, n, "%s", MIRROR_NAMES[mirrorMode]); break;
 	case OPT_MIRRORON: snprintf(out, n, "%s", mirrorOn ? "On" : "Off"); break;
 	case OPT_STAMPSIZE: snprintf(out, n, "%s", stampDragSize ? "Drag to size" : "Original"); break;
@@ -462,6 +560,10 @@ static void opt_change(OptKind k, int dir)
 	case OPT_SHADEDIR: shadeDarker = !shadeDarker; break;
 	case OPT_SELMODE: selMode = (selMode + SELMODE_COUNT + dir) % SELMODE_COUNT; break;
 	case OPT_WANDALL: wandAll = !wandAll; break;
+	case OPT_FONT: textFont = (textFont + FONT_COUNT + dir) % FONT_COUNT; break;
+	case OPT_TSCALE: textScale = textScale + dir < 1 ? 1 : textScale + dir > 4 ? 4 : textScale + dir; break;
+	case OPT_TSPACING: textSpacing = textSpacing + dir < -1 ? -1 : textSpacing + dir > 4 ? 4 : textSpacing + dir; break;
+	case OPT_TOUTLINE: textOutline = (textOutline + 1 + DOC_PALETTE_SIZE + 1 + dir) % (DOC_PALETTE_SIZE + 1) - 1; break;
 	case OPT_MIRROR: // Left-right, Top-bottom, Both ("Off" is the On/Off row)
 		mirrorMode = (Mirror)((mirrorMode - 1 + 3 + dir) % 3 + 1);
 		break;
@@ -523,6 +625,11 @@ static void run_option_action(OptKind k)
 	case OPT_ROTATE: sel_rotate(&doc); break;
 	case OPT_OUTLINE: sel_outline(&doc, doc_color_index(&doc, curColor, !sel_floating())); break;
 	case OPT_SAVESTAMP: save_stamp(); break;
+	case OPT_TEXTEDIT:
+		if (textOn) text_edit();
+		else set_status("Tap the canvas to type new text");
+		break;
+	case OPT_TEXTPLACE: text_place(); break;
 	case OPT_CROP:
 	{
 		finish_floating();
@@ -545,12 +652,14 @@ static void update_options(u32 kDown)
 	OptKind rows[OPT_MAX_ROWS];
 	int n = opt_rows(optTool, rows);
 	if (optSel >= n) optSel = n ? n - 1 : 0;
-	if (kDown & KEY_B) { mode = MODE_DRAW; return; }
+	if (kDown & KEY_B) { mode = MODE_DRAW; text_refresh(); return; }
 	if (kDown & KEY_A)
 	{
 		mode = MODE_DRAW;
 		if (n && rows[optSel] >= OPT_ACT_FIRST)
 			run_option_action(rows[optSel]);
+		else
+			text_refresh();
 		return;
 	}
 	if (n == 0) return;
@@ -585,6 +694,7 @@ static void tool_summary(Tool t, char* out, size_t n)
 		else snprintf(out, n, "%s", SELMODE_NAMES[selMode]);
 		break;
 	case TOOL_STAMP: snprintf(out, n, "%s%s", stampCount ? stampNames[stampSel] : "none", stampDragSize ? " (drag)" : ""); break;
+	case TOOL_TEXT: snprintf(out, n, "%s %dx", FONTS[textFont].name, textScale); break;
 	default: out[0] = 0; break;
 	}
 }
@@ -1493,7 +1603,9 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			if (doc.w != rw || doc.h != rh) sel_clear(&doc);
 			after_doc_change();
 		}
-		if (kDown & KEY_B)
+		if ((kDown & KEY_B) && tool == TOOL_TEXT && textOn)
+			text_place();
+		else if (kDown & KEY_B)
 		{
 			if (tool == TOOL_SELECT && sel_active())
 			{
@@ -1523,6 +1635,50 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 
 	bool dropper = (kHeld & KEY_R) || tool == TOOL_EYEDROPPER;
 	uint8_t value = tool == TOOL_ERASER ? PIX_TRANSPARENT : strokeValue;
+
+	if (tool == TOOL_TEXT && !(kHeld & KEY_R) &&
+	    (touchTarget == TOUCH_CANVAS || ((kDown & KEY_TOUCH) && touch.py >= STRIP_H)))
+	{
+		int cx, cy;
+		screen_to_canvas(touch.px, touch.py, &cx, &cy);
+		if (kDown & KEY_TOUCH)
+		{
+			touchTarget = TOUCH_CANVAS;
+			selDrag = SEL_IDLE;
+			if (textOn && sel_contains(cx, cy))
+			{
+				Rect r = sel_rect();
+				moveOffX = cx - r.x;
+				moveOffY = cy - r.y;
+				startCX = cx;
+				startCY = cy;
+				textMoved = false;
+				selDrag = SEL_MOVING;
+			}
+			else if (textOn)
+				text_place();                       // tap outside places the text
+			else if (layer_editable())
+			{
+				text_start(cx, cy);
+				touchTarget = TOUCH_STRIP;          // the keyboard ate this touch
+				return;
+			}
+		}
+		else if ((kHeld & KEY_TOUCH) && selDrag == SEL_MOVING && (textMoved || cx != startCX || cy != startCY))
+		{
+			textMoved = true;
+			sel_move_to(&doc, cx - moveOffX, cy - moveOffY);
+			after_doc_change();
+		}
+		if (!(kHeld & KEY_TOUCH))
+		{
+			if (selDrag == SEL_MOVING && !textMoved)
+				text_edit();                        // tapped the text: retype it
+			selDrag = SEL_IDLE;
+			touchTarget = TOUCH_NONE;
+		}
+		return;
+	}
 
 	if ((tool == TOOL_SELECT || tool == TOOL_STAMP) && !(kHeld & KEY_R) &&
 	    (touchTarget == TOUCH_CANVAS || ((kDown & KEY_TOUCH) && touch.py >= STRIP_H)))
@@ -1663,6 +1819,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				{
 					pick_color(recent[r]);
 					if (tool == TOOL_ERASER || tool == TOOL_EYEDROPPER) set_tool(TOOL_PENCIL);
+					text_refresh();
 				}
 			}
 			else if (slot >= 0 && slot < DOC_PALETTE_SIZE)
@@ -1689,6 +1846,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				curColor = doc.swatches[slot];
 				if (tool == TOOL_ERASER || tool == TOOL_EYEDROPPER)
 					set_tool(TOOL_PENCIL);
+				text_refresh();
 			}
 		}
 		else
@@ -2044,6 +2202,9 @@ static void draw_top_tools(void)
 		gfx_text(10, 220, 0.45f, C_DIM, "Pick a color below.  A: OK   B: cancel");
 	else if (tool == TOOL_SELECT)
 		gfx_text(10, 222, 0.42f, C_DIM, "Drag: select / move.  A: actions  B: deselect");
+	else if (tool == TOOL_TEXT)
+		gfx_text(10, 222, 0.42f, C_DIM, textOn ? "Drag: move  Tap it: edit  B / tap outside: place"
+		                                       : "Tap the canvas to type.  A: font, size, outline");
 	else if (tool == TOOL_STAMP)
 		gfx_text(10, 222, 0.42f, C_DIM, stampDragSize ? "Drag a box to size it (ZR: keep shape).  A: options"
 		                                               : "Touch to place, drag to position.  A: options");
@@ -2407,6 +2568,8 @@ int main(int argc, char* argv[])
 
 		if (statusTimer > 0)
 			statusTimer--;
+		if (textOn && !sel_floating())
+			textOn = false;      // placed or cancelled elsewhere (menu, undo)
 
 		// autosave: a recovery copy, never the project file itself
 		if (autosaveMin && doc.dirty && mode == MODE_DRAW && touchTarget == TOUCH_NONE && !sel_floating())

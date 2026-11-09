@@ -29,6 +29,7 @@ jobs:
           cc $F tests/test_layers.c source/pxd.c source/doc.c -o test_layers && ./test_layers
           cc $F tests/test_tools.c source/tools.c source/doc.c -lm -o test_tools && ./test_tools
           cc $F tests/test_select.c source/select.c source/export_png.c source/stamps.c source/pxd.c source/doc.c -lz -o test_select && ./test_select
+          cc $F tests/test_text.c source/text.c source/fonts_data.c -o test_text && ./test_text
           cc $F tests/test_import.c source/import.c source/export_png.c source/pxd.c source/doc.c -lpng16 -lz -lm -o test_import && ./test_import
 
   build:

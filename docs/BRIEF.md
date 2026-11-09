@@ -79,8 +79,10 @@ Stylus in right hand, frequent actions on left.
   guides (flip preview, 3x3 tile preview, HUD grid, isometric 2:1 grid, autosave/recovery); layers
   (Y menu: add/delete/duplicate, move in/out of folders, merge down/visible, opacity, hide/lock,
   rename, folders). .pxd v3.
+- **M5 (v0.5.0):** Text tool: 6 fonts (Tom Thumb, PICO-8, Spleen 5x8, Kenney Pixel + original CC0
+  Crow Term and Crow Industrial), size 1-4x, spacing, outline, multiline, move/retype/place.
 - **Next (Alex picks):**
-  - **Camera mode** (filters → pixel art), **text tool**, **left-handed mode**.
+  - **Camera mode** (filters → pixel art; shelved for now), **left-handed mode**.
   - **v2 animator** after layers.
 
 ## Open questions
