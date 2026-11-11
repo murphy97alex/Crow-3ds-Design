@@ -65,7 +65,11 @@ static void put(int x, int y, uint8_t v)
 	if (mirror == MIRROR_XY) set1(mx, my, v);
 }
 
-static uint8_t orig_at(int x, int y) { return orig[y * doc->w + x]; }
+static uint8_t orig_at(int x, int y)
+{
+	if (x < 0 || y < 0 || x >= doc->w || y >= doc->h) return PIX_TRANSPARENT;   // mirrored off the canvas
+	return orig[y * doc->w + x];
+}
 
 static void put_orig(int x, int y)
 {

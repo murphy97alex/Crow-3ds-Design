@@ -153,8 +153,13 @@ const char* pxd_save(const Doc* d, const char* path)
 	free(buf);
 
 	if (!ok) { remove(tmp); return "Write failed"; }
-	remove(path);
-	if (rename(tmp, path) != 0) { remove(tmp); return "Rename failed"; }
+	// Some file systems (the 3DS SD card) won't rename over an existing file. If the rename
+	// still fails, the new data stays in the .tmp file rather than being thrown away.
+	if (rename(tmp, path) != 0)
+	{
+		remove(path);
+		if (rename(tmp, path) != 0) return "Rename failed (saved as .pxd.tmp)";
+	}
 	return NULL;
 }
 
@@ -186,10 +191,15 @@ bool pxd_read_info(const char* path, int* w, int* h, int* layers, int* frames, b
 	bool gotHead = false;
 	*hasThumb = false;
 	*layers = 0;
+	fseek(f, 0, SEEK_END);
+	long size = ftell(f);
+	fseek(f, 0, SEEK_SET);
 	if (fread(hdr, 1, 4, f) != 4 || memcmp(hdr, "PXD\x1A", 4)) { fclose(f); return false; }
 	while (fread(hdr, 1, 8, f) == 8)
 	{
 		uint32_t len = get32(hdr + 4);
+		long at = ftell(f);
+		if (at < 0 || size < at || len > (uint32_t)(size - at)) break;   // chunk runs past the end
 		if (!memcmp(hdr, "HEAD", 4) && len >= 12 && len <= 64)
 		{
 			uint8_t b[64];
@@ -208,22 +218,33 @@ bool pxd_read_info(const char* path, int* w, int* h, int* layers, int* frames, b
 			*tw = get16(b);
 			*th = get16(b + 2);
 			if (*tw < 1 || *th < 1 || *tw > PXD_THUMB || *th > PXD_THUMB || (uint32_t)(4 + *tw * *th * 4) != len) break;
-			for (int i = 0; i < *tw * *th; i++)
+			int got = 0;
+			for (; got < *tw * *th; got++)
 			{
 				uint8_t p[4];
 				if (fread(p, 1, 4, f) != 4) break;
-				thumb[i] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+				thumb[got] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 			}
+			if (got != *tw * *th) break;
 			*hasThumb = true;
 			continue;
 		}
 		if (!memcmp(hdr, "LAYR", 4)) (*layers)++;
 		if (!memcmp(hdr, "FRAM", 4) && *layers == 0) *layers = 1;   // pre-layer files
 		if (!memcmp(hdr, "END ", 4)) break;
-		if (fseek(f, len, SEEK_CUR)) break;
+		if (fseek(f, (long)len, SEEK_CUR)) break;
 	}
 	fclose(f);
 	return gotHead;
+}
+
+// Names from a file end up on screen, in export file names and in JSON: keep plain printable
+// ASCII and nothing a path could trip over.
+static void clean_name(char* s, size_t n)
+{
+	s[n - 1] = 0;
+	for (; *s; s++)
+		if ((unsigned char)*s < 0x20 || (unsigned char)*s > 0x7E || strchr("/\\:*?\"<>|", *s)) *s = '_';
 }
 
 // Durations are stored with every layer's frames; read them from the first drawable layer.
@@ -265,12 +286,14 @@ const char* pxd_load(Doc* d, const char* path)
 
 		if (!memcmp(id, "HEAD", 4))
 		{
-			if (len < 12) { err = "Bad header"; break; }
+			if (len < 12 || gotHead) { err = "Bad header"; break; }   // one HEAD: sizes can't change later
 			if (get16(body) > PXD_VERSION) { err = "File is from a newer version"; break; }
 			nd.w = get16(body + 2);
 			nd.h = get16(body + 4);
 			expectFrames = get16(body + 6);
 			nd.fps = get16(body + 8);
+			if (nd.fps < 1) nd.fps = 8;
+			if (nd.fps > 100) nd.fps = 100;
 			nd.linkedSwatches = get16(body + 10) & 1;
 			headCur = len >= 14 ? get16(body + 12) : -1;
 			if (nd.w < 1 || nd.h < 1 || nd.w > DOC_MAX_W || nd.h > DOC_MAX_H ||
@@ -299,6 +322,7 @@ const char* pxd_load(Doc* d, const char* path)
 			Layer* L = &nd.layers[nd.layerCount];
 			memset(L, 0, sizeof(*L));
 			L->id = get16(body);
+			if (doc_layer_index(&nd, L->id) >= 0) { err = "Bad layer"; break; }   // ids must be unique
 			L->folder = (int)get16(body + 2) - 1;
 			L->isFolder = body[4] & 1;
 			L->visible = body[4] & 2;
@@ -306,6 +330,7 @@ const char* pxd_load(Doc* d, const char* path)
 			L->collapsed = body[4] & 8;
 			L->opacity = body[5];
 			memcpy(L->name, body + 8, LAYER_NAME_MAX - 1);
+			clean_name(L->name, LAYER_NAME_MAX);
 			curL = nd.layerCount++;
 			frames = 0;
 		}
@@ -348,15 +373,16 @@ const char* pxd_load(Doc* d, const char* path)
 		else if (!memcmp(id, "TAGS", 4) && len >= 1)
 		{
 			int cnt = body[0];
-			for (int t = 0; t < cnt && t < DOC_MAX_TAGS && 1 + (uint32_t)(t + 1) * 21 <= len; t++)
+			for (int t = 0; t < cnt && nd.tagCount < DOC_MAX_TAGS && 1 + (uint32_t)(t + 1) * 21 <= len; t++)
 			{
 				const uint8_t* q = body + 1 + t * 21;
 				Tag* T = &nd.tags[nd.tagCount++];
-				T->from = get16(q);
-				T->to = get16(q + 2);
+				int from = get16(q), to = get16(q + 2);    // clamped to the frame count after loading
+				T->from = from < DOC_MAX_FRAMES ? from : DOC_MAX_FRAMES - 1;
+				T->to = to < DOC_MAX_FRAMES ? to : DOC_MAX_FRAMES - 1;
 				T->dir = q[4] < TAG_DIR_COUNT ? q[4] : TAG_FORWARD;
 				memcpy(T->name, q + 5, TAG_NAME_MAX - 1);
-				T->name[TAG_NAME_MAX - 1] = 0;
+				clean_name(T->name, TAG_NAME_MAX);
 			}
 		}
 		else if (!memcmp(id, "END ", 4))
@@ -395,9 +421,18 @@ const char* pxd_load(Doc* d, const char* path)
 		nd.nextLayerId = 1;
 		for (int i = 0; i < nd.layerCount; i++)
 			if (nd.layers[i].id >= nd.nextLayerId) nd.nextLayerId = nd.layers[i].id + 1;
-		for (int i = 0; i < nd.layerCount; i++)
-			if (nd.layers[i].folder >= 0 && (nd.layers[i].isFolder || doc_layer_index(&nd, nd.layers[i].folder) < 0))
-				nd.layers[i].folder = -1;
+		// A member must sit below its folder with only fellow members in between (top down, so
+		// a member that loses its folder also frees the ones below it).
+		for (int i = nd.layerCount - 1; i >= 0; i--)
+		{
+			Layer* L = &nd.layers[i];
+			if (L->folder < 0) continue;
+			int f = doc_layer_index(&nd, L->folder);
+			bool ok = !L->isFolder && f > i && nd.layers[f].isFolder;
+			for (int j = i + 1; ok && j < f; j++)
+				ok = nd.layers[j].folder == L->folder;
+			if (!ok) L->folder = -1;
+		}
 		nd.curLayer = -1;
 		if (headCur >= 0 && headCur < nd.layerCount && !nd.layers[headCur].isFolder)
 			nd.curLayer = headCur;

@@ -82,6 +82,9 @@ bool doc_new(Doc* d, int w, int h)
 {
 	if (w < 1 || h < 1 || w > DOC_MAX_W || h > DOC_MAX_H)
 		return false;
+	uint8_t* first = calloc((size_t)w * h, 1);   // before touching d: a failure keeps the old document
+	if (!first)
+		return false;
 	doc_free(d);
 	d->w = w;
 	d->h = h;
@@ -96,11 +99,7 @@ bool doc_new(Doc* d, int w, int h)
 	d->layerCount = 1;
 	d->curLayer = 0;
 	layer_init(d, &d->layers[0], false);
-	if (!layer_alloc(d, &d->layers[0]))
-	{
-		doc_free(d);
-		return false;
-	}
+	d->layers[0].cels[0] = first;
 	d->linkedSwatches = false;
 	d->name[0] = '\0';
 	d->dirty = false;
@@ -563,8 +562,9 @@ void doc_composite(const Doc* d, int frame, uint32_t* out)
 
 int doc_frame_ms(const Doc* d, int f)
 {
-	if (d->frameMs[f]) return d->frameMs[f];
-	return 1000 / (d->fps ? d->fps : 8);
+	// never 0: playback and exports step by this
+	int ms = d->frameMs[f] ? d->frameMs[f] : 1000 / (d->fps ? d->fps : 8);
+	return ms < 10 ? 10 : ms;
 }
 
 size_t doc_pixel_bytes(const Doc* d)
@@ -698,15 +698,20 @@ static bool reframe(Doc* d, int w, int h, int ox, int oy)
 {
 	if (w < 1 || h < 1 || w > DOC_MAX_W || h > DOC_MAX_H)
 		return false;
-	for (int i = 0; i < d->layerCount; i++)
+	// Build every new buffer first, so running out of memory leaves the document untouched.
+	static uint8_t* fresh[DOC_MAX_LAYERS][DOC_MAX_FRAMES];
+	memset(fresh, 0, sizeof(fresh));
+	bool ok = true;
+	for (int i = 0; ok && i < d->layerCount; i++)
 	{
 		Layer* L = &d->layers[i];
 		if (L->isFolder) continue;
-		for (int f = 0; f < d->frameCount; f++)
+		for (int f = 0; ok && f < d->frameCount; f++)
 		{
-			if (cel_dup(L, f)) continue;   // linked: already moved to the new buffer below
+			if (cel_dup(L, f)) continue;   // linked: shares the first frame's new buffer
 			uint8_t* nb = calloc((size_t)w * h, 1);
-			if (!nb) return false;
+			if (!nb) { ok = false; break; }
+			fresh[i][f] = nb;
 			for (int y = 0; y < d->h; y++)
 			{
 				int ny = y + oy;
@@ -718,9 +723,25 @@ static bool reframe(Doc* d, int w, int h, int ox, int oy)
 						nb[ny * w + nx] = L->cels[f][y * d->w + x];
 				}
 			}
+		}
+	}
+	if (!ok)
+	{
+		for (int i = 0; i < DOC_MAX_LAYERS; i++)
+			for (int f = 0; f < DOC_MAX_FRAMES; f++)
+				free(fresh[i][f]);
+		return false;
+	}
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		Layer* L = &d->layers[i];
+		if (L->isFolder) continue;
+		for (int f = 0; f < d->frameCount; f++)
+		{
+			if (!fresh[i][f]) continue;
 			uint8_t* old = L->cels[f];
 			for (int g = f; g < d->frameCount; g++)   // every frame sharing this drawing
-				if (L->cels[g] == old) L->cels[g] = nb;
+				if (L->cels[g] == old) L->cels[g] = fresh[i][f];
 			free(old);
 		}
 	}
@@ -800,17 +821,28 @@ static void snap_restore_cel(Snap* s, Doc* d)
 	int li = doc_layer_index(d, s->layerId);
 	if (li >= 0 && !d->layers[li].isFolder && s->frame < d->frameCount)
 	{
-		int16_t map[DOC_MAX_COLORS + 1];
-		for (int v = 0; v <= DOC_MAX_COLORS; v++) map[v] = -1;
-		map[0] = 0;
+		uint8_t map[DOC_MAX_COLORS + 1] = { 0 };
+		bool used[DOC_MAX_COLORS + 1] = { false };
 		uint8_t* dst = d->layers[li].cels[s->frame];
 		size_t n = (size_t)d->w * d->h;
-		for (size_t i = 0; i < n; i++)
+		for (size_t i = 0; i < n; i++) used[s->cel[i]] = true;
+		// If the table is too full for a color to come back exactly, drop what this cel shows
+		// now (it is about to be replaced), compact, and map again.
+		for (int pass = 0; pass < 2; pass++)
 		{
-			uint8_t v = s->cel[i];
-			if (map[v] < 0) map[v] = v > s->colorCount ? 0 : doc_color_index(d, s->colors[v], false);
-			dst[i] = map[v];
+			bool exact = true;
+			for (int v = 1; v <= s->colorCount; v++)
+			{
+				if (!used[v]) continue;
+				map[v] = doc_color_index(d, s->colors[v], false);
+				if (d->colors[map[v]] != (s->colors[v] | 0xFF)) exact = false;
+			}
+			if (exact || pass) break;
+			memset(dst, 0, n);
+			doc_compact(d);
 		}
+		for (size_t i = 0; i < n; i++)
+			dst[i] = map[s->cel[i]];
 		d->curLayer = li;
 		d->curFrame = s->frame;
 	}

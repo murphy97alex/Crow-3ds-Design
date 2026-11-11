@@ -114,9 +114,10 @@ static void render(Doc* d)
 			bool mxOk = mx >= 0 && mx < d->w;
 			if ((floatMirror == MIRROR_X || floatMirror == MIRROR_XY) && mxOk)
 				px[y * d->w + mx] = v;
-			if ((floatMirror == MIRROR_Y || floatMirror == MIRROR_XY) && x >= 0 && x < d->w)
+			bool myOk = my >= 0 && my < d->h;   // a moved axis can mirror past the canvas
+			if ((floatMirror == MIRROR_Y || floatMirror == MIRROR_XY) && myOk && x >= 0 && x < d->w)
 				px[my * d->w + x] = v;
-			if (floatMirror == MIRROR_XY && mxOk)
+			if (floatMirror == MIRROR_XY && mxOk && myOk)
 				px[my * d->w + mx] = v;
 		}
 	}
@@ -403,15 +404,41 @@ void sel_cut(Doc* d)
 	sel_delete(d);
 }
 
+// Is there room in d's color table for every clipboard color it doesn't have yet?
+static bool clip_colors_fit(const Doc* d)
+{
+	uint32_t extra[DOC_MAX_COLORS];
+	int n = 0;
+	uint32_t last = 0;
+	for (int i = 0; i < clipW * clipH; i++)
+	{
+		if (!clip[i]) continue;
+		uint32_t c = clip[i] | 0xFF;
+		if (c == last) continue;
+		last = c;
+		int v;
+		for (v = 1; v <= d->colorCount && d->colors[v] != c; v++) {}
+		if (v <= d->colorCount) continue;
+		int k;
+		for (k = 0; k < n && extra[k] != c; k++) {}
+		if (k < n) continue;
+		if (d->colorCount + n >= DOC_MAX_COLORS) return false;
+		extra[n++] = c;
+	}
+	return true;
+}
+
 void sel_paste(Doc* d, int x, int y)
 {
 	if (!clip) return;
 	if (floating) sel_commit(d);
 	uint8_t* p = malloc((size_t)clipW * clipH);
 	if (!p) return;
-	// nothing is floating now, so the color table may be compacted to make room
+	// Nothing is floating now, so the color table may be compacted to make room. Do it once,
+	// up front: compacting part-way would drop the colors just added for this paste.
+	if (!clip_colors_fit(d)) doc_compact(d);
 	for (int i = 0; i < clipW * clipH; i++)
-		p[i] = clip[i] ? doc_color_index(d, clip[i], true) : PIX_TRANSPARENT;
+		p[i] = clip[i] ? doc_color_index(d, clip[i], false) : PIX_TRANSPARENT;
 	sel_float_pixels(d, p, clipW, clipH, x, y);
 	free(p);
 }

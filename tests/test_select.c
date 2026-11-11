@@ -236,6 +236,39 @@ int main(void)
 	char names[8][DOC_NAME_MAX];
 	assert(stamp_list(".", names, 8) >= 1);
 
+	// floating pixels with a mirror axis moved off centre: copies that land outside are skipped
+	sel_reset();
+	assert(doc_new(&d, 32, 32));
+	{
+		uint8_t dot[4] = { 1, 1, 1, 1 };
+		d.colors[1] = 0xFF0000FF; d.colorCount = 1;
+		sel_float_pixels(&d, dot, 2, 2, 10, 28);
+		sel_set_float_mirror(MIRROR_XY);
+		sel_set_mirror_axis(0, 4);            // top-bottom axis at y = 2: the copy would be at y = -25
+		sel_move_to(&d, 10, 29);
+		sel_set_mirror_axis(0, 62);           // axis at y = 31: copy at y = 31..32, half outside
+		sel_move_to(&d, 10, 29);
+		sel_commit(&d);
+		assert(count(1) == 12);               // 2x2, its left-right copy, and two 2x1 copies across y = 31
+		sel_set_mirror_axis(0, 0);
+	}
+
+	// paste into a nearly full color table: every pasted color survives the compaction
+	sel_reset();
+	assert(doc_new(&d, 32, 32));
+	{
+		for (int i = 0; i < 250; i++) doc_pixels(&d)[i] = doc_color_index(&d, 0x000000FF | ((uint32_t)(i + 1) << 16), false);
+		for (int i = 0; i < 100; i++) doc_color_index(&d, 0x00FF00FF | ((uint32_t)(i + 1) << 24), true);   // unused entries
+		static Doc s2;
+		assert(doc_new(&s2, 5, 1));
+		for (int i = 0; i < 5; i++) doc_pixels(&s2)[i] = doc_color_index(&s2, 0xFF0000FF | ((uint32_t)(i * 20) << 8), false);
+		sel_all(&s2); sel_copy(&s2); sel_reset();
+		sel_paste(&d, 0, 20); sel_commit(&d);
+		for (int i = 0; i < 5; i++) assert(doc_color(&d, at(i, 20)) == (0xFF0000FF | ((uint32_t)(i * 20) << 8)));
+		for (int i = 0; i < 250; i++) assert(doc_color(&d, doc_pixels(&d)[i]) == (0x000000FF | ((uint32_t)(i + 1) << 16)));
+		doc_free(&s2);
+	}
+
 	sel_reset();
 	doc_free(&d);
 	hist_clear();

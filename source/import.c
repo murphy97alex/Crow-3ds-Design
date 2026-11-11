@@ -42,8 +42,10 @@ const char* import_read_png(const char* path, int maxW, int maxH, uint32_t** rgb
 	uint8_t* volatile row = NULL;      // one decoded row (or the whole image if interlaced)
 	uint32_t* volatile out = NULL;
 	const char* volatile err = NULL;
+	png_bytep* volatile rows = NULL;
 	if (setjmp(png_jmpbuf(png)))
 	{
+		free(rows);
 		png_destroy_read_struct(&png, &info, NULL);
 		fclose(fp);
 		free(row);
@@ -92,11 +94,12 @@ const char* import_read_png(const char* path, int maxW, int maxH, uint32_t** rgb
 		// interlaced PNGs need the whole image in memory
 		row = malloc(rowBytes * sh);
 		if (!row) { err = "Out of memory (interlaced PNG - save it non-interlaced)"; png_error(png, "oom"); }
-		png_bytep* rows = malloc(sizeof(png_bytep) * sh);
+		rows = malloc(sizeof(png_bytep) * sh);
 		if (!rows) { err = "Out of memory"; png_error(png, "oom"); }
 		for (int y = 0; y < sh; y++) rows[y] = row + rowBytes * y;
 		png_read_image(png, rows);
 		free(rows);
+		rows = NULL;
 		for (int yo = 0; yo < nh; yo++)
 			sample_row(row + rowBytes * (size_t)((long)yo * sh / nh), sw, out + (size_t)yo * nw, nw);
 	}

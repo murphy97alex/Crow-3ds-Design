@@ -8,7 +8,7 @@ libctru + citro2d. See [docs/BRIEF.md](docs/BRIEF.md) for the plan.
 ## Home screen
 The app opens on **Home** (also START → Home). START on Home exits the app:
 - **New** tab: tap a canvas size twice (or A) to start, or Custom.
-- **Gallery** tab: thumbnails of saved projects, newest first (a recovered autosave shows first).
+- **Gallery** tab: thumbnails of saved projects, newest first (work recovered after a crash is saved as `recovered`).
   Animations get an orange frame-count badge (e.g. "8f").
   Tap to select, tap again or A to open; drag to scroll. Buttons: Open, Rename, Copy, Delete, Export
   (PNG with your export sizes). X deletes, Y renames, L/R switch tabs, B goes to the canvas.

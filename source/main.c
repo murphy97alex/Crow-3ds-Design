@@ -237,6 +237,14 @@ static void set_status(const char* msg)
 	statusTimer = 180;
 }
 
+// Is there room for `extra` more bytes of pixel buffers? Explains if not.
+static bool room_for(size_t extra)
+{
+	if (doc_pixel_bytes(&doc) + extra <= PIXEL_BUDGET) return true;
+	set_status("Out of room: fewer layers/frames or a smaller canvas");
+	return false;
+}
+
 // ---- view --------------------------------------------------------------------
 
 static float zoom(void) { return ZOOMS[zoomIdx]; }
@@ -897,6 +905,10 @@ static void run_option_action(OptKind k)
 		set_status("Select something first");
 		return;
 	}
+	bool edits = k == OPT_CUT || k == OPT_DELETE || k == OPT_FLIPH || k == OPT_FLIPV || k == OPT_ROTATE ||
+	             k == OPT_OUTLINE || (k == OPT_PASTE && sel_has_clip());
+	if (edits && !layer_editable())
+		return;
 	switch (k)
 	{
 	case OPT_SELALL: sel_all(&doc); break;
@@ -1500,6 +1512,9 @@ static void open_layers(void)
 {
 	layerThumbsDirty = true;
 	finish_floating();
+	// the cursor starts on the current layer, so it has to be visible in the list
+	int fo = doc.layers[doc.curLayer].folder >= 0 ? doc_layer_index(&doc, doc.layers[doc.curLayer].folder) : -1;
+	if (fo >= 0) doc.layers[fo].collapsed = false;
 	layerCursor = doc.curLayer;
 	mode = MODE_LAYERS;
 }
@@ -1510,6 +1525,8 @@ static void run_layer_action(int a)
 	Layer* L = &doc.layers[i];
 	int r = -1;
 	bool structural = a <= 7;
+	if ((a == 0 || (a == 2 && !L->isFolder)) && !room_for((size_t)doc.w * doc.h * doc.frameCount))
+		return;
 	if (structural) hist_begin(&doc);
 	switch (a)
 	{
@@ -1626,8 +1643,9 @@ static void import_as(int how)
 	else if (how == 0)
 	{
 		{
+			if (!doc_new(&doc, w, h)) { free(rgba); set_status("Out of memory"); return; }
 			sel_reset();
-			doc_new(&doc, w, h);
+			mirrorAX2 = mirrorAY2 = 0;
 			uint8_t* px = import_to_indexed(&doc, rgba, w, h);
 			if (px) { memcpy(doc.layers[0].cels[0], px, (size_t)w * h); free(px); }
 			snprintf(doc.name, sizeof(doc.name), "%s", base);
@@ -1637,6 +1655,7 @@ static void import_as(int how)
 			set_status(shrunk ? "Imported (shrunk to fit 320x240)" : "Imported as new project");
 		}
 	}
+	else if (how == 1 && !room_for((size_t)doc.w * doc.h * doc.frameCount)) {}
 	else if (how == 1)
 	{
 		hist_begin(&doc);
@@ -1868,7 +1887,13 @@ static void update_more_menus(u32 kDown, u32 kHeld, touchPosition touch)
 		if (kDown & KEY_DUP) anchorY = anchorY > 0 ? anchorY - 1 : 0;
 		if (kDown & KEY_DDOWN) anchorY = anchorY < 2 ? anchorY + 1 : 2;
 		if (kDown & KEY_B) mode = MODE_MENU;
-		if (kDown & KEY_A)
+		if ((kDown & KEY_A) && resizeW * resizeH > doc.w * doc.h &&
+		    doc_pixel_bytes(&doc) / ((size_t)doc.w * doc.h) * resizeW * resizeH > PIXEL_BUDGET)
+		{
+			set_status("Too big for this many layers and frames");
+			mode = MODE_DRAW;
+		}
+		else if (kDown & KEY_A)
 		{
 			sel_clear(&doc);
 			hist_begin(&doc);
@@ -2789,7 +2814,7 @@ static void update_shift(u32 kDown, u32 kHeld, touchPosition touch)
 
 static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 {
-	if (kDown & KEY_START) { curve_finish(); finish_floating(); mode = MODE_MENU; menuSel = 0; return; }
+	if ((kDown & KEY_START) && touchTarget == TOUCH_NONE) { curve_finish(); finish_floating(); mode = MODE_MENU; menuSel = 0; return; }
 	if ((kDown & KEY_A) && touchTarget == TOUCH_NONE)
 	{
 		if (tool == TOOL_STAMP) refresh_stamps();
@@ -2885,6 +2910,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 
 	if ((kDown & KEY_TOUCH) && touchTarget == TOUCH_NONE && bar_shown() && touch.py >= BAR_Y)
 	{
+		curve_finish();              // a line waiting to be bent belongs to the frame it was drawn on
 		bar_touch(touch.px);
 		touchTarget = TOUCH_STRIP;   // the rest of this touch does nothing
 		return;
@@ -3112,7 +3138,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 			screen_to_canvas(touch.px, touch.py, &cx, &cy);
 			if (curveStage && !dropper)
 				curveBend = true;                    // second step of a curve: bend it
-			else
+			else if (!curveStage)                    // (an eyedrop mid-curve must not move its start)
 			{
 			startCX = cx;
 			startCY = cy;
@@ -3911,7 +3937,25 @@ int main(int argc, char* argv[])
 	export_recommended();
 	curColor = doc.swatches[0];
 	if (file_exists(AUTOSAVE_PATH))
-		set_status("Unsaved work was recovered: it's first in the Gallery");
+	{
+		// Left over from a crash or power-off: turn it into a normal project right away, so
+		// starting something new, opening another project or exiting can't delete it.
+		char nm[DOC_NAME_MAX], to[160];
+		for (int k = 1; k < 100; k++)
+		{
+			if (k == 1) snprintf(nm, sizeof(nm), "recovered");
+			else snprintf(nm, sizeof(nm), "recovered_%d", k);
+			project_path(to, sizeof(to), nm);
+			if (!file_exists(to)) break;
+		}
+		if (!file_exists(to) && rename(AUTOSAVE_PATH, to) == 0)
+		{
+			char msg[96];
+			snprintf(msg, sizeof(msg), "Unsaved work was recovered: \"%s\" in the Gallery", nm);
+			set_status(msg);
+		}
+		else set_status("Unsaved work was recovered: it's first in the Gallery");
+	}
 	open_home(false);
 
 	while (running && aptMainLoop())

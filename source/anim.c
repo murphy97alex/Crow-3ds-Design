@@ -351,7 +351,12 @@ static void lzw_frame(BitOut* o, LzwTable* t, const uint8_t* idx, int sw, int sh
 			cur = k;
 		}
 	}
-	if (cur >= 0) put_code(o, cur, codeSize);
+	if (cur >= 0)
+	{
+		put_code(o, cur, codeSize);
+		// the decoder adds a table entry for this code too, which can widen the next code
+		if (maxCode + 1 >= (1 << codeSize) && codeSize < 12) codeSize++;
+	}
 	put_code(o, eoi, codeSize);
 	flush_bits(o);
 }

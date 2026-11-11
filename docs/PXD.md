@@ -1,4 +1,4 @@
-# `.pxd` project file format (version 3)
+# `.pxd` project file format (version 4)
 
 One file per project, saved to `sdmc:/3ds/pixel-crow/projects/<name>.pxd`.
 All integers are little-endian.
@@ -10,6 +10,11 @@ chunks  repeated: id (4 ASCII bytes), length (u32), payload (length bytes)
 
 Readers skip chunks they don't know, so new data (layers, stamps, …) can be added
 without breaking old files. A file ends with an `END ` chunk.
+
+Readers treat files as untrusted: a chunk that runs past the end of the file, a second `HEAD`,
+duplicate layer ids, or a linked cel that doesn't point at an earlier frame makes the file
+invalid. Out-of-range values are clamped (fps 1-100, tags to the frame count, at most 16 tags),
+folder links that break the layout rule below are dropped, and names keep printable ASCII only.
 
 | Chunk | Payload |
 |-------|---------|
