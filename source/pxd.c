@@ -269,7 +269,16 @@ const char* pxd_load(Doc* d, const char* path)
 	if (!data) { fclose(f); return "Out of memory"; }
 	bool rd = fread(data, 1, size, f) == (size_t)size;
 	fclose(f);
-	if (!rd || memcmp(data, "PXD\x1A", 4) != 0) { free(data); return "Not a .pxd file"; }
+	const char* err = rd ? pxd_load_mem(d, data, (size_t)size) : "Not a .pxd file";
+	free(data);
+	return err;
+}
+
+const char* pxd_load_mem(Doc* d, const uint8_t* data, size_t dataSize)
+{
+	if (dataSize < 12 || dataSize > 16 * 1024 * 1024) return "Bad file size";
+	long size = (long)dataSize;
+	if (memcmp(data, "PXD\x1A", 4) != 0) return "Not a .pxd file";
 
 	Doc nd = {0};
 	const char* err = NULL;
@@ -390,7 +399,6 @@ const char* pxd_load(Doc* d, const char* path)
 		// unknown chunks are skipped
 		p += 8 + len;
 	}
-	free(data);
 
 	// version 1 files: the palette was both the color table and the swatches
 	if (!gotSwatches)

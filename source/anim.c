@@ -54,9 +54,62 @@ void anim_sheet_grid(int n, SheetLayout layout, int* cols, int* rows)
 
 // ---- sprite sheet ---------------------------------------------------------------
 
+// Where everything goes: the part of each frame that is kept (tx, ty, tw, th in canvas
+// pixels), the cell size on the sheet (fw, fh) and the sheet size (W, H).
+typedef struct { int from, n, cols, rows, scale, pad, tx, ty, tw, th, fw, fh; long W, H; } SheetPlan;
+
+static const char* sheet_plan(const Doc* d, int tag, const SheetOpts* o, SheetPlan* p)
+{
+	int to;
+	anim_range(d, tag, &p->from, &to);
+	p->n = to - p->from + 1;
+	anim_sheet_grid(p->n, o->layout, &p->cols, &p->rows);
+	p->scale = o->scale < 1 ? 1 : o->scale;
+	p->pad = o->pad < 0 ? 0 : o->pad > 64 ? 64 : o->pad;
+	p->tx = p->ty = 0;
+	p->tw = d->w;
+	p->th = d->h;
+	if (o->trim)
+	{
+		// one box for every frame, so the cells stay the same size and nothing jitters
+		uint32_t* buf = malloc((size_t)d->w * d->h * 4);
+		if (!buf) return "Out of memory";
+		int x0 = d->w, y0 = d->h, x1 = -1, y1 = -1;
+		for (int f = p->from; f <= to; f++)
+		{
+			doc_composite(d, f, buf);
+			for (int y = 0; y < d->h; y++)
+				for (int x = 0; x < d->w; x++)
+					if (buf[y * d->w + x] & 255)
+					{
+						if (x < x0) x0 = x;
+						if (x > x1) x1 = x;
+						if (y < y0) y0 = y;
+						if (y > y1) y1 = y;
+					}
+		}
+		free(buf);
+		if (x1 >= 0) { p->tx = x0; p->ty = y0; p->tw = x1 - x0 + 1; p->th = y1 - y0 + 1; }
+	}
+	p->fw = p->tw * p->scale;
+	p->fh = p->th * p->scale;
+	p->W = (long)p->cols * p->fw + (long)(p->cols - 1) * p->pad;
+	p->H = (long)p->rows * p->fh + (long)(p->rows - 1) * p->pad;
+	return NULL;
+}
+
+bool anim_sheet_size(const Doc* d, int tag, const SheetOpts* o, int* w, int* h)
+{
+	SheetPlan p;
+	if (sheet_plan(d, tag, o, &p)) return false;
+	*w = (int)p.W;
+	*h = (int)p.H;
+	return p.W <= PNG_MAX_DIM && p.H <= PNG_MAX_DIM;
+}
+
 typedef struct {
 	const Doc* d;
-	int from, n, cols, scale;
+	SheetPlan p;
 	uint32_t* buf;   // composites of one row of frames: cols * w * h
 	int bufRow;
 } SheetCtx;
@@ -65,40 +118,40 @@ static void sheet_row(void* ctx, int y, uint32_t* row)
 {
 	SheetCtx* s = ctx;
 	const Doc* d = s->d;
-	int fw = d->w * s->scale, fh = d->h * s->scale;
-	int r = y / fh;
+	const SheetPlan* p = &s->p;
+	int stepY = p->fh + p->pad, stepX = p->fw + p->pad;
+	memset(row, 0, (size_t)p->W * 4);
+	if (y % stepY >= p->fh) return;                  // padding between rows
+	int r = y / stepY;
 	if (r != s->bufRow)
 	{
-		for (int c = 0; c < s->cols; c++)
+		for (int c = 0; c < p->cols; c++)
 		{
-			int k = r * s->cols + c;
+			int k = r * p->cols + c;
 			uint32_t* dst = s->buf + (size_t)c * d->w * d->h;
-			if (k < s->n) doc_composite(d, s->from + k, dst);
+			if (k < p->n) doc_composite(d, p->from + k, dst);
 			else memset(dst, 0, (size_t)d->w * d->h * 4);
 		}
 		s->bufRow = r;
 	}
-	int fy = (y % fh) / s->scale;
-	for (int c = 0; c < s->cols; c++)
+	int fy = p->ty + (y % stepY) / p->scale;
+	for (int c = 0; c < p->cols; c++)
 	{
-		const uint32_t* src = s->buf + (size_t)c * d->w * d->h + (size_t)fy * d->w;
-		uint32_t* dst = row + c * fw;
-		for (int x = 0; x < fw; x++) dst[x] = src[x / s->scale];
+		const uint32_t* src = s->buf + (size_t)c * d->w * d->h + (size_t)fy * d->w + p->tx;
+		uint32_t* dst = row + c * stepX;
+		for (int x = 0; x < p->fw; x++) dst[x] = src[x / p->scale];
 	}
 }
 
-const char* anim_export_sheet(const Doc* d, int tag, SheetLayout layout, int scale, const char* path)
+const char* anim_export_sheet(const Doc* d, int tag, const SheetOpts* o, const char* path)
 {
-	int from, to;
-	anim_range(d, tag, &from, &to);
-	int n = to - from + 1, cols, rows;
-	anim_sheet_grid(n, layout, &cols, &rows);
-	if (scale < 1) scale = 1;
-	long W = (long)cols * d->w * scale, H = (long)rows * d->h * scale;
-	if (W > PNG_MAX_DIM || H > PNG_MAX_DIM) return "Sheet too big";
-	SheetCtx s = { d, from, n, cols, scale, malloc((size_t)cols * d->w * d->h * 4), -1 };
+	SheetCtx s = { .d = d, .bufRow = -1 };
+	const char* err = sheet_plan(d, tag, o, &s.p);
+	if (err) return err;
+	if (s.p.W > PNG_MAX_DIM || s.p.H > PNG_MAX_DIM) return "Sheet too big";
+	s.buf = malloc((size_t)s.p.cols * d->w * d->h * 4);
 	if (!s.buf) return "Out of memory";
-	const char* err = pngx_write_rows((int)W, (int)H, sheet_row, &s, path);
+	err = pngx_write_rows((int)s.p.W, (int)s.p.H, sheet_row, &s, path);
 	free(s.buf);
 	return err;
 }
@@ -116,14 +169,14 @@ static void json_str(FILE* f, const char* s)
 	fputc('"', f);
 }
 
-const char* anim_export_sheet_json(const Doc* d, int tag, SheetLayout layout, int scale, const char* image, const char* path)
+const char* anim_export_sheet_json(const Doc* d, int tag, const SheetOpts* o, const char* image, const char* path)
 {
-	int from, to;
-	anim_range(d, tag, &from, &to);
-	int n = to - from + 1, cols, rows;
-	anim_sheet_grid(n, layout, &cols, &rows);
-	if (scale < 1) scale = 1;
-	int fw = d->w * scale, fh = d->h * scale;
+	SheetPlan p;
+	const char* perr = sheet_plan(d, tag, o, &p);
+	if (perr) return perr;
+	int from = p.from, to = p.from + p.n - 1, n = p.n, cols = p.cols, scale = p.scale;
+	int fw = p.fw, fh = p.fh;
+	bool trimmed = p.tw != d->w || p.th != d->h;
 	FILE* f = fopen(path, "w");
 	if (!f) return "Can't open file";
 	const char* base = d->name[0] ? d->name : "untitled";
@@ -134,16 +187,17 @@ const char* anim_export_sheet_json(const Doc* d, int tag, SheetLayout layout, in
 		snprintf(fname, sizeof(fname), "%s %d.pxd", base, k);
 		fprintf(f, "   { \"filename\": ");
 		json_str(f, fname);
-		fprintf(f, ",\n     \"frame\": { \"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d },\n", (k % cols) * fw, (k / cols) * fh, fw, fh);
-		fprintf(f, "     \"rotated\": false,\n     \"trimmed\": false,\n");
-		fprintf(f, "     \"spriteSourceSize\": { \"x\": 0, \"y\": 0, \"w\": %d, \"h\": %d },\n", fw, fh);
-		fprintf(f, "     \"sourceSize\": { \"w\": %d, \"h\": %d },\n", fw, fh);
+		fprintf(f, ",\n     \"frame\": { \"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d },\n", (k % cols) * (fw + p.pad),
+		        (k / cols) * (fh + p.pad), fw, fh);
+		fprintf(f, "     \"rotated\": false,\n     \"trimmed\": %s,\n", trimmed ? "true" : "false");
+		fprintf(f, "     \"spriteSourceSize\": { \"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d },\n", p.tx * scale, p.ty * scale, fw, fh);
+		fprintf(f, "     \"sourceSize\": { \"w\": %d, \"h\": %d },\n", d->w * scale, d->h * scale);
 		fprintf(f, "     \"duration\": %d\n   }%s\n", doc_frame_ms(d, from + k), k + 1 < n ? "," : "");
 	}
 	fprintf(f, " ],\n \"meta\": {\n  \"app\": \"Pixel Crow\",\n  \"version\": \"1.0\",\n  \"image\": ");
 	json_str(f, image);
 	fprintf(f, ",\n  \"format\": \"RGBA8888\",\n  \"size\": { \"w\": %d, \"h\": %d },\n  \"scale\": \"%d\",\n",
-	        cols * fw, rows * fh, scale);
+	        (int)p.W, (int)p.H, scale);
 	// tags inside the exported range, renumbered from 0
 	static const char* DIRS[TAG_DIR_COUNT] = { "forward", "reverse", "pingpong" };
 	fprintf(f, "  \"frameTags\": [");

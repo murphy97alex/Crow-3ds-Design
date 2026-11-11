@@ -2,6 +2,13 @@
 .SUFFIXES:
 #---------------------------------------------------------------------------------
 
+# `make test` runs the PC-side tests; it needs no devkitPro (see scripts/host-tests.sh).
+ifeq ($(firstword $(MAKECMDGOALS)),test)
+.PHONY: test
+test:
+	@sh scripts/host-tests.sh
+else
+
 ifeq ($(strip $(DEVKITARM)),)
 $(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
 endif
@@ -18,7 +25,7 @@ APP_AUTHOR      := murphy97alex
 APP_PRODUCT_CODE := CTR-H-PXUI
 APP_UNIQUE_ID   := 0xC7A30
 APP_VERSION_MAJOR := 0
-APP_VERSION_MINOR := 9
+APP_VERSION_MINOR := 10
 APP_VERSION_MICRO := 0
 
 #---------------------------------------------------------------------------------
@@ -151,3 +158,5 @@ $(OUTPUT).elf : $(OFILES)
 #---------------------------------------------------------------------------------
 endif
 #---------------------------------------------------------------------------------
+
+endif # not `make test`

@@ -16,12 +16,19 @@ int anim_sequence(const Doc* d, int tag, int* out);
 // Columns x rows of a sheet with n frames.
 void anim_sheet_grid(int n, SheetLayout layout, int* cols, int* rows);
 
+// Sprite sheet options. pad = transparent pixels between cells (in the exported image).
+// trim = cut the empty border away; every frame is cut by the same box (the smallest that
+// holds all of them), so cells stay one size.
+typedef struct { SheetLayout layout; int scale, pad; bool trim; } SheetOpts;
+// Size of the sheet these options give; false if it is too big to export.
+bool anim_sheet_size(const Doc* d, int tag, const SheetOpts* o, int* w, int* h);
+
 // Each returns NULL on success, or a short error message.
-// Sprite sheet of the frames in the tag's range (in order), each scaled by `scale`.
-const char* anim_export_sheet(const Doc* d, int tag, SheetLayout layout, int scale, const char* path);
+// Sprite sheet of the frames in the tag's range (in order).
+const char* anim_export_sheet(const Doc* d, int tag, const SheetOpts* o, const char* path);
 // Data file for the sheet in Aseprite's JSON "array" layout (read by Godot, Unity, Phaser...):
 // frame rectangles, durations, tags in the range. `image` = the sheet's file name.
-const char* anim_export_sheet_json(const Doc* d, int tag, SheetLayout layout, int scale, const char* image, const char* path);
+const char* anim_export_sheet_json(const Doc* d, int tag, const SheetOpts* o, const char* image, const char* path);
 // Numbered PNGs: `base` + "_001.png", "_002.png", ...
 const char* anim_export_frames(const Doc* d, int tag, int scale, const char* base);
 // Looping animated GIF in playback order with each frame's duration.

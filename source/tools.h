@@ -43,6 +43,8 @@ void tools_gradient_fill(int x0, int y0, int x1, int y1, uint8_t v);
 // (used by the shading tool). Pass NULL to turn off.
 void tools_set_value_map(const uint8_t* map);
 
+// Tile drawing: strokes and shapes that cross an edge continue on the opposite edge.
+void tools_set_wrap(bool on);
 // While set, drawing only changes pixels for which inside(x, y) is true (the selection).
 void tools_set_clip(bool (*inside)(int x, int y));
 

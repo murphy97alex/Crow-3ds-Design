@@ -8,6 +8,8 @@
 // Returns NULL on success, or a short error message.
 const char* pxd_save(const Doc* d, const char* path);
 const char* pxd_load(Doc* d, const char* path); // does not touch undo history
+// Same, from a file already in memory. Treats the bytes as untrusted.
+const char* pxd_load_mem(Doc* d, const uint8_t* data, size_t size);
 
 #define PXD_THUMB 64   // thumbnails fit in 64x64
 

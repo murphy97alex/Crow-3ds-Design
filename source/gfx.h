@@ -10,6 +10,9 @@ void gfx_frame_begin(void);  // resets the per-frame text buffer
 
 // Canvas texture mirrors the current frame of the document.
 void gfx_canvas_rebuild(const Doc* d);
+// Refresh only a rectangle (inclusive corners, clamped) - for brush strokes. Valid while the
+// document's size, frame and everything outside the rectangle are as at the last full rebuild.
+void gfx_canvas_rebuild_rect(const Doc* d, int x0, int y0, int x1, int y1);
 void gfx_canvas_flush(void);
 // Draw the canvas (with checkerboard behind transparent pixels) at (x,y), scaled.
 void gfx_draw_canvas(const Doc* d, float x, float y, float scale, float clipY0, float clipY1);

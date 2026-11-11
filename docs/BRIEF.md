@@ -100,8 +100,17 @@ Stylus in right hand, frequent actions on left.
   frames / animated GIF export, .pxd v4. Grid toggle moved to View.
 - **v0.9.x (2026-11-09):** sprite sheets also write a JSON data file (Aseprite array layout, for
   game engines); export "each tag" as separate files; gallery frame-count badge.
-- **Ideas for others' needs (later):** palette import/export (.gpl, .hex), indexed PNG export,
-  LCD display export (RGB565 / C header) once Crow's display is chosen.
+- **v0.10.0 (2026-11-11, review + "commit to all"):** fixes from a full code review (file loading
+  hardened, mirrored floats, resize, undo colors, autosave recovery kept as `recovered`). New: Old 3DS
+  stand-ins (hold SELECT = ZR, R + L = redo; freehand strokes only redraw the changed box; smooth
+  rotation only for small pieces on Old 3DS), left-handed mode (View), settings remembered between
+  launches, import sprite sheet / GIF as frames, `.hex` / `.gpl` palette import + export, indexed PNG
+  export, sheet padding + trim, tile drawing (wrap), undo for swatches / tags / frame times / layer
+  properties, one-frame tags follow a moved frame, copy cel to next frame / clear cel, frame bar
+  no longer covers the canvas (and can be hidden), memory readout, "N more not shown" notes,
+  large preview in the Frames panel, `make test` + loader fuzz test. Old 3DS is marked "untested"
+  in the README and at startup. **Not yet tried on hardware** - Old 3DS and left-handed especially.
+- **Ideas for others' needs (later):** LCD display export (RGB565 / C header) once Crow's display is chosen.
 - **Before sharing the repo publicly (shelved 2026-11-09):** Old 3DS support - detect New 3DS;
   on Old 3DS map redo to R+L and the ZR functions (pan, snap, free stretch, 15° rotation) to
   Select + touch or an on-screen modifier toggle; only re-composite the changed area while drawing;

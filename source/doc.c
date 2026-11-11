@@ -528,15 +528,26 @@ bool doc_merge_visible(Doc* d)
 
 void doc_composite(const Doc* d, int frame, uint32_t* out)
 {
-	size_t n = (size_t)d->w * d->h;
-	memset(out, 0, n * 4);
+	doc_composite_rect(d, frame, out, 0, 0, d->w - 1, d->h - 1);
+}
+
+void doc_composite_rect(const Doc* d, int frame, uint32_t* out, int x0, int y0, int x1, int y1)
+{
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > d->w - 1) x1 = d->w - 1;
+	if (y1 > d->h - 1) y1 = d->h - 1;
+	if (x0 > x1 || y0 > y1) return;
+	for (int y = y0; y <= y1; y++)
+		memset(out + (size_t)y * d->w + x0, 0, (size_t)(x1 - x0 + 1) * 4);
 	for (int i = 0; i < d->layerCount; i++)
 	{
 		if (d->layers[i].isFolder || !doc_layer_visible(d, i)) continue;
 		int a = doc_layer_opacity(d, i);
 		if (a <= 0) continue;
 		const uint8_t* px = d->layers[i].cels[frame];
-		for (size_t k = 0; k < n; k++)
+		for (int y = y0; y <= y1; y++)
+		for (size_t k = (size_t)y * d->w + x0, kEnd = (size_t)y * d->w + x1; k <= kEnd; k++)
 		{
 			uint8_t v = px[k];
 			if (!v) continue;
@@ -656,7 +667,25 @@ bool doc_frame_move(Doc* d, int f, int dir)
 	uint16_t ms = d->frameMs[f];
 	d->frameMs[f] = d->frameMs[g];
 	d->frameMs[g] = ms;
+	for (int t = 0; t < d->tagCount; t++)
+	{
+		Tag* T = &d->tags[t];
+		if (T->from != T->to) continue;        // longer tags keep their place in the timeline
+		if (T->from == f) T->from = T->to = (uint8_t)g;
+		else if (T->from == g) T->from = T->to = (uint8_t)f;
+	}
 	if (d->curFrame == f) d->curFrame = g;
+	else if (d->curFrame == g) d->curFrame = f;
+	return true;
+}
+
+bool doc_cel_copy_next(Doc* d, int li, int f)
+{
+	Layer* L = &d->layers[li];
+	if (L->isFolder || f < 0 || f + 1 >= d->frameCount) return false;
+	if (L->cels[f + 1] == L->cels[f]) return true;       // linked: already the same drawing
+	if (!doc_cel_unlink(d, li, f + 1)) return false;
+	memcpy(L->cels[f + 1], L->cels[f], (size_t)d->w * d->h);
 	return true;
 }
 
@@ -765,8 +794,20 @@ bool doc_crop(Doc* d, int x, int y, int w, int h)
 #define HIST_MAX 48
 #define HIST_BUDGET (12u * 1024 * 1024)   // bytes of pixel data kept for undo/redo
 
+// Everything undoable that isn't pixels or structure.
 typedef struct {
-	Doc* doc;      // whole-document deep copy (swatches, name and dirty flag ignored on restore)
+	uint16_t fps, frameMs[DOC_MAX_FRAMES];
+	Tag tags[DOC_MAX_TAGS];
+	int tagCount;
+	uint32_t swatches[DOC_PALETTE_SIZE];
+	int layerCount;
+	struct { int id; char name[LAYER_NAME_MAX]; bool visible, locked, collapsed; uint8_t opacity; } layers[DOC_MAX_LAYERS];
+} Meta;
+
+typedef struct {
+	Doc* doc;      // whole-document deep copy (name and dirty flag ignored on restore)
+	Meta* meta;    // or: settings only
+	int key;       // meta: which setting, so repeated changes share a step
 	uint8_t* cel;  // or: one cel's pixels, with the color table they refer to
 	uint32_t* colors;
 	int colorCount, layerId, frame;
@@ -788,6 +829,8 @@ static void snap_free(Snap* s)
 	}
 	free(s->cel);
 	free(s->colors);
+	free(s->meta);
+	s->meta = NULL;
 	s->doc = NULL;
 	s->cel = NULL;
 	s->colors = NULL;
@@ -849,6 +892,59 @@ static void snap_restore_cel(Snap* s, Doc* d)
 	snap_free(s);
 }
 
+static bool snap_take_meta(Snap* s, const Doc* d, int key)
+{
+	memset(s, 0, sizeof(*s));
+	Meta* m = calloc(1, sizeof(Meta));
+	if (!m) return false;
+	m->fps = d->fps;
+	memcpy(m->frameMs, d->frameMs, sizeof(m->frameMs));
+	memcpy(m->tags, d->tags, sizeof(m->tags));
+	m->tagCount = d->tagCount;
+	memcpy(m->swatches, d->swatches, sizeof(m->swatches));
+	m->layerCount = d->layerCount;
+	for (int i = 0; i < d->layerCount; i++)
+	{
+		const Layer* L = &d->layers[i];
+		m->layers[i].id = L->id;
+		memcpy(m->layers[i].name, L->name, LAYER_NAME_MAX);
+		m->layers[i].visible = L->visible;
+		m->layers[i].locked = L->locked;
+		m->layers[i].collapsed = L->collapsed;
+		m->layers[i].opacity = L->opacity;
+	}
+	s->meta = m;
+	s->key = key;
+	return true;
+}
+
+static void snap_restore_meta(Snap* s, Doc* d)
+{
+	const Meta* m = s->meta;
+	d->fps = m->fps;
+	memcpy(d->frameMs, m->frameMs, sizeof(m->frameMs));
+	memcpy(d->tags, m->tags, sizeof(m->tags));
+	d->tagCount = m->tagCount;
+	for (int t = 0; t < d->tagCount; t++)      // stay inside the frames there are now
+	{
+		if (d->tags[t].to >= d->frameCount) d->tags[t].to = d->frameCount - 1;
+		if (d->tags[t].from > d->tags[t].to) d->tags[t].from = d->tags[t].to;
+	}
+	memcpy(d->swatches, m->swatches, sizeof(m->swatches));
+	for (int i = 0; i < m->layerCount; i++)
+	{
+		int li = doc_layer_index(d, m->layers[i].id);
+		if (li < 0) continue;
+		Layer* L = &d->layers[li];
+		memcpy(L->name, m->layers[i].name, LAYER_NAME_MAX);
+		L->visible = m->layers[i].visible;
+		L->locked = m->layers[i].locked;
+		L->collapsed = m->layers[i].collapsed;
+		L->opacity = m->layers[i].opacity;
+	}
+	snap_free(s);
+}
+
 static bool snap_take(Snap* s, const Doc* d)
 {
 	memset(s, 0, sizeof(*s));
@@ -874,16 +970,14 @@ static bool snap_take(Snap* s, const Doc* d)
 // Restore the document from a snapshot (consumes the snapshot's pixel buffers).
 static void snap_restore(Snap* s, Doc* d)
 {
+	if (s->meta) { snap_restore_meta(s, d); return; }
 	if (!s->doc) { snap_restore_cel(s, d); return; }
 	Doc* c = s->doc;
-	uint32_t sw[DOC_PALETTE_SIZE];
 	char name[DOC_NAME_MAX];
 	bool linked = d->linkedSwatches;
-	memcpy(sw, d->swatches, sizeof(sw));
 	memcpy(name, d->name, sizeof(name));
 	doc_free(d);
 	*d = *c;
-	memcpy(d->swatches, sw, sizeof(sw));
 	memcpy(d->name, name, sizeof(name));
 	d->linkedSwatches = linked;
 	free(c);
@@ -962,13 +1056,24 @@ void hist_push(const Doc* d)
 	hist_commit();
 }
 
+void hist_push_meta(const Doc* d, int key)
+{
+	if (key && redoCount == 0 && undoCount > 0 && undoStack[undoCount - 1].meta && undoStack[undoCount - 1].key == key)
+		return;   // still the same adjustment: the step already holds the value from before it
+	Snap s;
+	if (!snap_take_meta(&s, d, key)) return;
+	stack_clear(redoStack, &redoCount);
+	stack_push(undoStack, &undoCount, s);
+}
+
 static bool hist_move(Doc* d, Snap* from, int* nFrom, Snap* to, int* nTo)
 {
 	if (*nFrom == 0)
 		return false;
 	Snap cur;
 	Snap* top = &from[*nFrom - 1];
-	if (!(top->doc ? snap_take(&cur, d) : snap_take_cel(&cur, d, top->layerId, top->frame)))
+	if (!(top->meta ? snap_take_meta(&cur, d, 0) : top->doc ? snap_take(&cur, d)
+	                : snap_take_cel(&cur, d, top->layerId, top->frame)))
 		return false;
 	Snap s = from[--(*nFrom)];
 	snap_restore(&s, d);

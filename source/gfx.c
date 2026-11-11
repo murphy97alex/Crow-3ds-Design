@@ -64,9 +64,26 @@ void gfx_fini(void)
 
 void gfx_frame_begin(void) { C2D_TextBufClear(textBuf); }
 
+static uint32_t canvasComp[DOC_MAX_W * DOC_MAX_H];   // what the canvas texture shows
+
+void gfx_canvas_rebuild_rect(const Doc* d, int x0, int y0, int x1, int y1)
+{
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > d->w - 1) x1 = d->w - 1;
+	if (y1 > d->h - 1) y1 = d->h - 1;
+	if (x0 > x1 || y0 > y1) return;
+	doc_composite_rect(d, d->curFrame, canvasComp, x0, y0, x1, y1);
+	u32* t = (u32*)canvasTex.data;
+	for (int y = y0; y <= y1; y++)
+		for (int x = x0; x <= x1; x++)
+			t[tiled(x, y, CANVAS_TEX_W)] = canvasComp[y * d->w + x];
+	canvasDirty = true;
+}
+
 void gfx_canvas_rebuild(const Doc* d)
 {
-	static uint32_t comp[DOC_MAX_W * DOC_MAX_H];
+	uint32_t* comp = canvasComp;
 	doc_composite(d, d->curFrame, comp);   // all visible layers
 	u32* t = (u32*)canvasTex.data;
 	for (int y = 0; y < d->h; y++)

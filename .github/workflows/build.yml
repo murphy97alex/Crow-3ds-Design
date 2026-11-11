@@ -22,17 +22,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install libpng
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpng-dev
-      - name: Host tests (file format, layers, undo, tools, selection, PNG, frames, GIF)
-        run: |
-          F="-Wall -Wextra -Werror -fsanitize=address,undefined -g -I/usr/include/libpng16 -I source"
-          cc $F tests/test_pxd.c source/pxd.c source/doc.c -o test_pxd && ./test_pxd
-          cc $F tests/test_layers.c source/pxd.c source/doc.c -o test_layers && ./test_layers
-          cc $F tests/test_tools.c source/tools.c source/doc.c -lm -o test_tools && ./test_tools
-          cc $F tests/test_select.c source/select.c source/export_png.c source/stamps.c source/pxd.c source/doc.c -lz -lm -o test_select && ./test_select
-          cc $F tests/test_text.c source/text.c source/fonts_data.c -o test_text && ./test_text
-          cc $F tests/test_import.c source/import.c source/export_png.c source/pxd.c source/doc.c -lpng16 -lz -lm -o test_import && ./test_import
-          cc $F tests/test_frames.c source/pxd.c source/doc.c -o test_frames && ./test_frames
-          cc $F tests/test_anim.c source/anim.c source/export_png.c source/import.c source/doc.c -lpng16 -lz -lm -o test_anim && ./test_anim
+      - name: Host tests (file formats, undo, tools, selection, import / export, settings, input, loader fuzz)
+        run: make test
 
   build:
     needs: test

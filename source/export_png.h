@@ -2,11 +2,16 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "doc.h"
+#include <stdbool.h>
 
 #define PNG_MAX_DIM 2560
 
 // Returns NULL on success, or a short error message.
 const char* png_export(const Doc* d, int frame, int outW, int outH, const char* path);
+// Indexed (palette) PNG of a frame at a whole-number scale: 8-bit indexes, a PLTE with only
+// the colors in the picture, transparency as index 0. Fails if it shows more than 256 colors
+// (layer opacity can blend new ones).
+const char* png_export_indexed(const Doc* d, int frame, int scale, const char* path);
 // Write an RGBA (0xRRGGBBAA) image of sw x sh, scaled to outW x outH.
 // Stream rows from a callback (row = outW pixels, 0xRRGGBBAA).
 typedef void (*PngxRowFn)(void* ctx, int y, uint32_t* row);

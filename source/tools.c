@@ -39,8 +39,17 @@ bool tools_changed(void)
 	return changed || memcmp(doc_pixels(doc), orig, (size_t)doc->w * doc->h) != 0;
 }
 
+static bool wrapOn;
+void tools_set_wrap(bool on) { wrapOn = on; }
+
 static void set1(int x, int y, uint8_t v)
 {
+	if (wrapOn)
+	{
+		// tile drawing: what leaves one edge comes back in on the other
+		x = ((x % doc->w) + doc->w) % doc->w;
+		y = ((y % doc->h) + doc->h) % doc->h;
+	}
 	if (x < 0 || y < 0 || x >= doc->w || y >= doc->h)
 		return;
 	if (clipFn && !clipFn(x, y))

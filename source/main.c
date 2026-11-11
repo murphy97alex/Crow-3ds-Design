@@ -16,7 +16,10 @@
 #include "anim.h"
 #include "export_png.h"
 #include "import.h"
+#include "input.h"
+#include "palette_io.h"
 #include "pxd.h"
+#include "settings.h"
 #include "select.h"
 #include "stamps.h"
 #include "text.h"
@@ -33,6 +36,13 @@
 #define EXPORT_DIR SAVE_ROOT "/export"
 #define IMPORT_DIR SAVE_ROOT "/import"
 #define AUTOSAVE_PATH SAVE_DIR "/_autosave.pxd"
+#define SETTINGS_PATH SAVE_ROOT "/settings.txt"
+
+// input.c mirrors libctru's button bits so it can be tested on a PC
+#define SAME_KEY(name) ((u32)IN_##name == (u32)KEY_##name)
+_Static_assert(SAME_KEY(A) && SAME_KEY(B) && SAME_KEY(SELECT) && SAME_KEY(START) && SAME_KEY(DRIGHT) &&
+               SAME_KEY(DLEFT) && SAME_KEY(DUP) && SAME_KEY(DDOWN) && SAME_KEY(R) && SAME_KEY(L) && SAME_KEY(X) &&
+               SAME_KEY(Y) && SAME_KEY(ZL) && SAME_KEY(ZR) && SAME_KEY(TOUCH), "input.h must match libctru's KEY_ bits");
 
 // Bottom screen layout
 #define BOT_W 320
@@ -44,7 +54,8 @@
 #define RECENT_W (BOT_W / RECENT_COUNT)
 #define STRIP_H (SW_H * 3)  // palette strip (2 rows of swatches + recent colors) at the top
 #define VIEW_Y STRIP_H
-#define VIEW_H (BOT_H - VIEW_Y)
+#define VIEW_H view_h()   // canvas area: below the palette strip, above the frame bar (if shown)
+static int view_h(void);
 
 #define COL(r, g, b) C2D_Color32(r, g, b, 255)
 #define C_BG_TOP   COL(0x20, 0x22, 0x28)
@@ -189,6 +200,7 @@ static int resizeW, resizeH, anchorX = 1, anchorY = 1;
 // import
 static char importFiles[64][DOC_NAME_MAX + 8];
 static int importCount, importSel, importAsSel;
+static int importHow, importCols = 4, importRows = 1;   // what a confirmed "new project" import does
 // colors
 static int colorsSel;
 static int adjSel, adjHue, adjSat, adjBri;
@@ -217,6 +229,15 @@ static bool frameThumbOk[DOC_MAX_FRAMES];
 #define BAR_H 20                   // frame bar at the bottom of the touch screen (2+ frames)
 #define BAR_Y (BOT_H - BAR_H)
 #define PIXEL_BUDGET (24u << 20)   // memory for all frames x layers
+static bool barHidden;             // View: hide the frame bar (frames stay reachable with X)
+static bool bigPreview;            // Frames panel: the preview fills the top screen
+static bool wrapDraw;              // View: tile drawing, strokes wrap around the canvas edges
+static int sheetPad;               // export: transparent pixels between sprite sheet cells
+static bool sheetTrim;             // export: cut the empty border off sprite sheet cells
+// buttons
+static InputMap inputMap;          // left-handed mode, Old 3DS stand-ins for ZL / ZR
+static bool isNew3DS = true;
+static int strokeLastCX, strokeLastCY;
 
 static void scan_imports(void);
 static void open_frames(void);
@@ -224,8 +245,8 @@ static bool bar_shown(void);
 static void bar_touch(int x);
 static void update_frames(u32 kDown);
 static void run_frame_action(int a);
-enum { FA_NEW, FA_DUP, FA_DEL, FA_LINK, FA_UNLINK, FA_MS, FA_FPS, FA_TAGNEW, FA_TAGSTART, FA_TAGEND, FA_TAGDIR,
-       FA_TAGNAME, FA_TAGDEL, FA_PLAYTAG, FA_COUNT };
+enum { FA_NEW, FA_DUP, FA_DEL, FA_LINK, FA_UNLINK, FA_COPYNEXT, FA_CLEAR, FA_MS, FA_FPS, FA_TAGNEW, FA_TAGSTART, FA_TAGEND, FA_TAGDIR,
+       FA_TAGNAME, FA_TAGDEL, FA_PLAYTAG, FA_BIGVIEW, FA_COUNT };
 
 static void import_as(int how);
 static void open_home(bool fromCanvas);
@@ -243,6 +264,11 @@ static bool room_for(size_t extra)
 	if (doc_pixel_bytes(&doc) + extra <= PIXEL_BUDGET) return true;
 	set_status("Out of room: fewer layers/frames or a smaller canvas");
 	return false;
+}
+
+static int view_h(void)
+{
+	return BOT_H - VIEW_Y - (doc.frameCount > 1 && !barHidden ? BAR_H : 0);
 }
 
 // ---- view --------------------------------------------------------------------
@@ -311,6 +337,7 @@ static void refresh_stamps(void)
 {
 	stampCount = stamp_list(STAMP_DIR, stampNames, STAMP_MAX);
 	if (stampSel >= stampCount) stampSel = stampCount ? stampCount - 1 : 0;
+	if (stampCount == STAMP_MAX) set_status("Showing the first 64 stamps (delete some in /3ds/pixel-crow/stamps)");
 }
 
 // Drop any floating pixels into the canvas (one undo step).
@@ -321,6 +348,17 @@ static void finish_floating(void)
 		sel_commit(&doc);
 		after_doc_change();
 	}
+}
+
+static void curve_finish(void);
+
+// Settle every edit that is still "in the air" (a curve waiting to be bent, floating pixels,
+// text being placed). Anything that changes frame, layer, document or screen calls this first,
+// so a pending edit can never land on a different cel than the one it was started on.
+static void finish_pending(void)
+{
+	curve_finish();
+	finish_floating();
 }
 
 // ---- text tool ---------------------------------------------------------------------
@@ -560,7 +598,8 @@ static void tf_end(void)
 {
 	float x, y, w, h, a;
 	sel_transform_get(&x, &y, &w, &h, &a);
-	if (a != 0) sel_transform(&doc, x, y, w, h, a, true);   // smoother rotation once let go
+	// smoother rotation once let go; on an Old 3DS only for small pieces (it is 64x the work)
+	if (a != 0 && (isNew3DS || w * h <= 48 * 48)) sel_transform(&doc, x, y, w, h, a, true);
 	if (tool == TOOL_TEXT)
 	{
 		int sw, sh;
@@ -1160,7 +1199,7 @@ static void run_action(Action a)
 	case ACT_OPEN: open_project(openFiles[openSel]); break;
 	case ACT_EXIT: remove(AUTOSAVE_PATH); running = false; break;
 	case ACT_OVERWRITE: save_as_name(pendingName); break;
-	case ACT_IMPORT_PROJECT: import_as(0); break;
+	case ACT_IMPORT_PROJECT: import_as(importHow); break;
 	case ACT_DELETE_GAL: gallery_delete(); break;
 	default: break;
 	}
@@ -1171,7 +1210,7 @@ static void run_action(Action a)
 enum { MI_BACK, MI_HOME, MI_SAVE, MI_SAVEAS, MI_IMPORT, MI_EXPORT, MI_SIZE, MI_SHIFT, MI_COLORS, MI_VIEW,
        MI_LINKED, MI_EXIT, MENU_COUNT };
 static const char* MENU_ITEMS[MENU_COUNT] = { "Back to canvas", "Home (new / gallery)", "Save", "Save as...",
-                                              "Import PNG...", "Export (PNG / sheet / GIF)...", "Canvas size...", "Shift layer (wrap)...",
+                                              "Import (PNG, GIF, palette)...", "Export (PNG / sheet / GIF)...", "Canvas size...", "Shift layer (wrap)...",
                                               "Colors...", "View...", "Linked swatches", "Exit" };
 #define MENU_LINKED MI_LINKED
 
@@ -1183,14 +1222,17 @@ static const ExportSize EXPORT_SIZES[] = {
 	{ 0, 16 }, { 0, 24 }, { 0, 32 }, { 0, 48 }, { 0, 64 }, { 0, 128 }, { 0, 256 },
 };
 #define EXPORT_SIZE_COUNT (int)(sizeof(EXPORT_SIZES) / sizeof(EXPORT_SIZES[0]))
-#define EXPORT_HEAD 3                        // format, frames, layout rows
+#define EXPORT_HEAD 5                        // format, frames, layout, padding, trim rows
 #define EXPORT_ROWS (EXPORT_HEAD + EXPORT_SIZE_COUNT + 2)  // + "Recommended" + sizes + "Export"
 static bool exportOn[EXPORT_SIZE_COUNT];
 static int exportSel;
-enum { EXF_PNG, EXF_SHEET, EXF_FRAMES, EXF_GIF, EXF_COUNT };
-static const char* EXF_NAMES[EXF_COUNT] = { "PNG (this frame)", "Sprite sheet PNG", "PNG per frame", "Animated GIF" };
+enum { EXF_PNG, EXF_SHEET, EXF_FRAMES, EXF_GIF, EXF_PNG8, EXF_COUNT };
+static const char* EXF_NAMES[EXF_COUNT] = { "PNG (this frame)", "Sprite sheet PNG", "PNG per frame", "Animated GIF",
+                                            "Indexed PNG (this frame)" };
+static const int SHEET_PADS[] = { 0, 1, 2, 4, 8 };
 static const char* LAYOUT_NAMES[SHEET_LAYOUT_COUNT] = { "One row", "One column", "Grid" };
 static int exportFmt, exportTag = -1, exportLayout = SHEET_ROW;   // exportTag: -1 all frames, -2 each tag
+static bool export_one_frame(void) { return exportFmt == EXF_PNG || exportFmt == EXF_PNG8; }
 
 static void export_recommended(void)
 {
@@ -1230,13 +1272,13 @@ static bool export_dims_for(const Doc* d, int i, int* w, int* h, bool* even)
 		if (*h < 1) *h = 1;
 		*even = e->fixed % longest == 0;
 	}
-	if (exportFmt != EXF_PNG && !*even) return false;   // animations: whole-number scales only
+	if (exportFmt != EXF_PNG && !*even) return false;   // everything else: whole-number scales only
 	if (exportFmt == EXF_SHEET)
 	{
-		int from, to, cols, rows;
-		anim_range(d, exportTag, &from, &to);
-		anim_sheet_grid(to - from + 1, exportLayout, &cols, &rows);
-		return *w * cols <= PNG_MAX_DIM && *h * rows <= PNG_MAX_DIM;
+		// checked without trimming (never bigger with it, and it would composite every frame here)
+		SheetOpts o = { exportLayout, *w / d->w, sheetPad, false };
+		int sw, sh;
+		return anim_sheet_size(d, exportTag, &o, &sw, &sh);
 	}
 	if (exportFmt == EXF_GIF) return *w <= GIF_MAX_DIM && *h <= GIF_MAX_DIM;
 	return *w <= PNG_MAX_DIM && *h <= PNG_MAX_DIM;
@@ -1248,13 +1290,14 @@ static void run_export_doc(const Doc* d, const char* base)
 {
 	ensure_dirs();
 	int done = 0, failed = 0;
+	const char* lastErr = NULL;
 	for (int i = 0; i < EXPORT_SIZE_COUNT; i++)
 	{
 		int w, h;
 		bool even;
 		if (!exportOn[i] || !export_dims_for(d, i, &w, &h, &even)) continue;
 		// "each tag" exports one file per tag (or all frames if there are none)
-		bool each = exportTag == -2 && exportFmt != EXF_PNG && d->tagCount > 0;
+		bool each = exportTag == -2 && !export_one_frame() && d->tagCount > 0;
 		int t0 = each ? 0 : exportTag < -1 ? -1 : exportTag, t1 = each ? d->tagCount - 1 : t0;
 		for (int tag = t0; tag <= t1; tag++)
 		{
@@ -1270,14 +1313,20 @@ static void run_export_doc(const Doc* d, const char* base)
 			char img[DOC_NAME_MAX + TAG_NAME_MAX + 24];
 			snprintf(img, sizeof(img), "%s_sheet_%dx.png", stem, scale);
 			snprintf(path, sizeof(path), EXPORT_DIR "/%s", img);
-			err = anim_export_sheet(d, tag, exportLayout, scale, path);
+			SheetOpts o = { exportLayout, scale, sheetPad, sheetTrim };
+			err = anim_export_sheet(d, tag, &o, path);
 			if (!err)
 			{
 				snprintf(path, sizeof(path), EXPORT_DIR "/%s_sheet_%dx.json", stem, scale);
-				err = anim_export_sheet_json(d, tag, exportLayout, scale, img, path);
+				err = anim_export_sheet_json(d, tag, &o, img, path);
 			}
 			break;
 		}
+		case EXF_PNG8:
+			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx%d_indexed.png", base, w, h);
+			err = png_export_indexed(d, d->curFrame, scale, path);
+			if (err) lastErr = err;
+			break;
 		case EXF_FRAMES:
 			snprintf(path, sizeof(path), EXPORT_DIR "/%s_%dx", stem, scale);
 			err = anim_export_frames(d, tag, scale, path);
@@ -1296,8 +1345,10 @@ static void run_export_doc(const Doc* d, const char* base)
 		}
 	}
 	char msg[96];
-	const char* what = exportFmt == EXF_GIF ? "GIF" : exportFmt == EXF_SHEET ? "sheet" : exportFmt == EXF_FRAMES ? "frame set" : "PNG";
-	if (failed) snprintf(msg, sizeof(msg), "Exported %d %s, %d failed", done, what, failed);
+	const char* what = exportFmt == EXF_GIF ? "GIF" : exportFmt == EXF_SHEET ? "sheet" : exportFmt == EXF_FRAMES ? "frame set"
+	                 : exportFmt == EXF_PNG8 ? "indexed PNG" : "PNG";
+	if (failed && lastErr) snprintf(msg, sizeof(msg), "%.90s", lastErr);
+	else if (failed) snprintf(msg, sizeof(msg), "Exported %d %s, %d failed", done, what, failed);
 	else if (done) snprintf(msg, sizeof(msg), "Exported %d %s to /3ds/pixel-crow/export", done, what);
 	else snprintf(msg, sizeof(msg), "No sizes ticked");
 	set_status(msg);
@@ -1436,7 +1487,14 @@ static void update_menus(u32 kDown)
 				k = (k + n + dir) % n;
 				exportTag = k == 0 ? -1 : k == 1 ? -2 : k - 2;
 			}
-			else exportLayout = (exportLayout + SHEET_LAYOUT_COUNT + dir) % SHEET_LAYOUT_COUNT;
+			else if (exportSel == 2) exportLayout = (exportLayout + SHEET_LAYOUT_COUNT + dir) % SHEET_LAYOUT_COUNT;
+			else if (exportSel == 3)
+			{
+				int k;
+				for (k = 0; k < 5 && SHEET_PADS[k] != sheetPad; k++) {}
+				sheetPad = SHEET_PADS[(k % 5 + 5 + dir) % 5];
+			}
+			else sheetTrim = !sheetTrim;
 		}
 		else if (kDown & KEY_A)
 		{
@@ -1511,7 +1569,7 @@ static void make_layer_thumbs(void)
 static void open_layers(void)
 {
 	layerThumbsDirty = true;
-	finish_floating();
+	finish_pending();
 	// the cursor starts on the current layer, so it has to be visible in the list
 	int fo = doc.layers[doc.curLayer].folder >= 0 ? doc_layer_index(&doc, doc.layers[doc.curLayer].folder) : -1;
 	if (fo >= 0) doc.layers[fo].collapsed = false;
@@ -1538,12 +1596,17 @@ static void run_layer_action(int a)
 	case 5: r = doc_layer_move(&doc, i, -1); break;
 	case 6: r = doc_layer_merge_down(&doc, i) ? doc.curLayer : -1; break;
 	case 7: r = doc_merge_visible(&doc) ? doc.curLayer : -1; break;
-	case 8: L->visible = !L->visible; doc.dirty = true; break;
-	case 9: L->locked = !L->locked; doc.dirty = true; break;
+	case 8: hist_push_meta(&doc, 0); L->visible = !L->visible; doc.dirty = true; break;
+	case 9: hist_push_meta(&doc, 0); L->locked = !L->locked; doc.dirty = true; break;
 	case 10:
 	{
 		char nm[DOC_NAME_MAX];
-		if (ask_text("Layer name", L->name, nm, LAYER_NAME_MAX)) { snprintf(L->name, LAYER_NAME_MAX, "%.15s", nm); doc.dirty = true; }
+		if (ask_text("Layer name", L->name, nm, LAYER_NAME_MAX))
+		{
+			hist_push_meta(&doc, 0);
+			snprintf(L->name, LAYER_NAME_MAX, "%.15s", nm);
+			doc.dirty = true;
+		}
 		break;
 	}
 	case 11:
@@ -1581,11 +1644,12 @@ static void update_layers(u32 kDown)
 	if (kDown & (KEY_DLEFT | KEY_DRIGHT))
 	{
 		int o = L->opacity + ((kDown & KEY_DRIGHT) ? 26 : -26);
+		hist_push_meta(&doc, 0x100 + L->id);          // one undo step per run of presses
 		L->opacity = o < 0 ? 0 : o > 255 ? 255 : o;
 		doc.dirty = true;
 		after_doc_change();
 	}
-	if (kDown & KEY_X) { L->visible = !L->visible; doc.dirty = true; after_doc_change(); }
+	if (kDown & KEY_X) { hist_push_meta(&doc, 0); L->visible = !L->visible; doc.dirty = true; after_doc_change(); }
 	if (kDown & KEY_R) run_layer_action(4);
 	if (kDown & KEY_L) run_layer_action(5);
 	if (kDown & KEY_A) { layerActSel = 0; mode = MODE_LAYER_ACT; }
@@ -1603,37 +1667,104 @@ static void scan_imports(void)
 	while ((e = readdir(dir)) && importCount < 64)
 	{
 		size_t n = strlen(e->d_name);
-		if (n > 4 && n < sizeof(importFiles[0]) && !strcasecmp(e->d_name + n - 4, ".png"))
+		const char* ext = n > 4 ? e->d_name + n - 4 : "";
+		if (n < sizeof(importFiles[0]) && (!strcasecmp(ext, ".png") || !strcasecmp(ext, ".gif") ||
+		                                   !strcasecmp(ext, ".hex") || !strcasecmp(ext, ".gpl")))
 			snprintf(importFiles[importCount++], sizeof(importFiles[0]), "%s", e->d_name);
 	}
 	closedir(dir);
 	qsort(importFiles, importCount, sizeof(importFiles[0]), (int (*)(const void*, const void*))strcasecmp);
 }
 
-static const char* IMPORT_AS[] = { "As new project", "As new layer", "As stamp", "As swatches (palette)" };
+#define IMPORT_AS_COUNT 5
+static const char* IMPORT_AS[IMPORT_AS_COUNT] = { "As new project", "As new layer", "As stamp", "As swatches (palette)",
+                                                  "As animation (sprite sheet)..." };
+enum { IMP_PROJECT, IMP_LAYER, IMP_STAMP, IMP_SWATCHES, IMP_SHEET, IMP_GIF };
 
-// how: 0 project, 1 layer, 2 stamp, 3 swatches
-static void import_as(int how)
+static bool import_has_ext(const char* ext)
 {
-	char path[200];
-	snprintf(path, sizeof(path), IMPORT_DIR "/%s", importFiles[importSel]);
-	uint32_t* rgba;
-	int w, h;
-	bool shrunk = false;
-	// shrink while reading: big images never sit in memory at full size
-	int maxW = how == 1 ? doc.w : DOC_MAX_W, maxH = how == 1 ? doc.h : DOC_MAX_H;
-	const char* err = import_read_png(path, maxW, maxH, &rgba, &w, &h, &shrunk);
-	if (err) { set_status(err); return; }
-	char base[DOC_NAME_MAX];
-	snprintf(base, sizeof(base), "%s", importFiles[importSel]);
+	size_t n = strlen(importFiles[importSel]);
+	return n > 4 && !strcasecmp(importFiles[importSel] + n - 4, ext);
+}
+
+// The selected file's name without extension, made safe for a project name.
+static void import_base_name(char* base, size_t n)
+{
+	snprintf(base, n, "%s", importFiles[importSel]);
 	char* dot = strrchr(base, '.');
 	if (dot) *dot = 0;
 	for (char* c = base; *c; c++)
 		if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '-')) *c = '_';
+}
+
+// An import just replaced the whole document (undo history already cleared).
+static void import_replaced_doc(const char* msg)
+{
+	sel_reset();
+	mirrorAX2 = mirrorAY2 = 0;
+	import_base_name(doc.name, sizeof(doc.name));
+	doc.dirty = true;
+	remove(AUTOSAVE_PATH);
+	layerThumbsDirty = true;
+	view_fit();
+	set_status(msg);
+	after_doc_change();
+}
+
+// .hex / .gpl: the file's colors become the swatches (one undo step; the drawing is untouched)
+static void import_palette_file(void)
+{
+	char path[200];
+	snprintf(path, sizeof(path), IMPORT_DIR "/%s", importFiles[importSel]);
+	uint32_t cols[DOC_PALETTE_SIZE];
+	int n = palette_load(path, cols, DOC_PALETTE_SIZE);
+	if (!n) { set_status("No colors found in that file"); return; }
+	hist_push_meta(&doc, 0);
+	memcpy(doc.swatches, cols, n * sizeof(uint32_t));
+	doc.dirty = true;
+	char msg[64];
+	snprintf(msg, sizeof(msg), "Set %d swatch%s from the palette file", n, n == 1 ? "" : "es");
+	set_status(msg);
+}
+
+// how: IMP_* (project, layer, stamp, swatches, sprite sheet as frames, GIF as frames)
+static void import_as(int how)
+{
+	char path[200];
+	snprintf(path, sizeof(path), IMPORT_DIR "/%s", importFiles[importSel]);
+	if (how == IMP_GIF)
+	{
+		bool cut = false;
+		const char* gerr = import_gif_doc(&doc, path, &cut);
+		if (gerr) { set_status(gerr); return; }
+		import_replaced_doc(cut ? "Imported the first 64 frames of the GIF" : "Imported GIF as an animation");
+		return;
+	}
+	uint32_t* rgba;
+	int w, h;
+	bool shrunk = false;
+	// shrink while reading: big images never sit in memory at full size
+	int maxW = how == IMP_LAYER ? doc.w : DOC_MAX_W, maxH = how == IMP_LAYER ? doc.h : DOC_MAX_H;
+	if (how == IMP_SHEET) { maxW = DOC_MAX_W * importCols; maxH = DOC_MAX_H * importRows; }
+	const char* err = import_read_png(path, maxW, maxH, &rgba, &w, &h, &shrunk);
+	if (err) { set_status(err); return; }
+	char base[DOC_NAME_MAX];
+	import_base_name(base, sizeof(base));
+	if (how == IMP_SHEET)
+	{
+		err = import_sheet_doc(&doc, rgba, w, h, importCols, importRows);
+		free(rgba);
+		if (err) { set_status(err); return; }
+		char msg[64];
+		snprintf(msg, sizeof(msg), "Imported %d frames of %dx%d", doc.frameCount, doc.w, doc.h);
+		import_replaced_doc(msg);
+		return;
+	}
 	if (how == 3)
 	{
 		uint32_t cols[DOC_PALETTE_SIZE];
 		int n = import_palette(rgba, w, h, cols, DOC_PALETTE_SIZE);
+		if (n) hist_push_meta(&doc, 0);
 		memcpy(doc.swatches, cols, n * sizeof(uint32_t));
 		doc.dirty = true;
 		char msg[64];
@@ -1741,7 +1872,7 @@ static void adjust_preview(void)
 
 static void adjust_begin(void)
 {
-	finish_floating();
+	finish_pending();
 	if (!layer_editable()) { mode = MODE_DRAW; return; }
 	doc_compact(&doc);  // room for new colors
 	size_t n = (size_t)doc.w * doc.h;
@@ -1800,6 +1931,9 @@ static void make_ramp(int end)
 	uint32_t from[DOC_PALETTE_SIZE], to[DOC_PALETTE_SIZE];
 	int n = 0;
 	uint32_t c0 = doc.swatches[lo], c1 = doc.swatches[hi];
+	// one undo step: the whole document when linked swatches may recolor pixels too
+	if (doc.linkedSwatches) hist_begin(&doc);
+	else hist_push_meta(&doc, 0);
 	for (int k = lo + 1; k < hi; k++)
 	{
 		float t = (float)(k - lo) / (hi - lo);
@@ -1815,9 +1949,8 @@ static void make_ramp(int end)
 	}
 	if (doc.linkedSwatches)
 	{
-		hist_begin(&doc);
-		if (doc_recolor(&doc, from, to, n)) { hist_commit(); after_doc_change(); }
-		else hist_abort();
+		if (doc_recolor(&doc, from, to, n)) after_doc_change();
+		hist_commit();
 	}
 	doc.dirty = true;
 	char msg[64];
@@ -1825,13 +1958,29 @@ static void make_ramp(int end)
 	set_status(msg);
 }
 
-static const char* COLORS_ITEMS[] = { "Color ramp (between two swatches)...", "Adjust colors (hue/sat/bright/invert)..." };
+#define COLORS_COUNT 3
+static const char* COLORS_ITEMS[COLORS_COUNT] = { "Color ramp (between two swatches)...", "Adjust colors (hue/sat/bright/invert)...",
+                                                  "Export swatches (.hex + .gpl palette files)" };
+
+// The 32 swatches as palette files other pixel-art tools read.
+static void export_palette(void)
+{
+	ensure_dirs();
+	const char* base = doc.name[0] ? doc.name : "untitled";
+	char path[200];
+	snprintf(path, sizeof(path), EXPORT_DIR "/%s_palette.hex", base);
+	const char* err = palette_save_hex(path, doc.swatches, DOC_PALETTE_SIZE);
+	snprintf(path, sizeof(path), EXPORT_DIR "/%s_palette.gpl", base);
+	if (!err) err = palette_save_gpl(path, base, doc.swatches, DOC_PALETTE_SIZE);
+	set_status(err ? err : "Saved the palette to /3ds/pixel-crow/export");
+}
 
 // ---- view -------------------------------------------------------------------------
 
-#define VIEW_ROWS 9
+#define VIEW_ROWS 12
 static const char* VIEW_LABELS[VIEW_ROWS] = { "Pixel grid", "Onion skin", "Onion frames", "Onion opacity", "Flip preview",
-                                              "Tile preview", "HUD grid", "Iso grid", "Autosave" };
+                                              "Tile preview", "HUD grid", "Iso grid", "Autosave", "Tile drawing",
+                                              "Frame bar", "Left-handed" };
 static void view_value(int row, char* out, size_t n)
 {
 	switch (row)
@@ -1845,6 +1994,9 @@ static void view_value(int row, char* out, size_t n)
 	case 6: if (hudGrid) snprintf(out, n, "Every %d px", hudGrid); else snprintf(out, n, "Off"); break;
 	case 7: if (isoGrid) snprintf(out, n, "2:1, %d px", isoGrid); else snprintf(out, n, "Off"); break;
 	case 8: if (autosaveMin) snprintf(out, n, "Every %d min", autosaveMin); else snprintf(out, n, "Off"); break;
+	case 9: snprintf(out, n, "%s", wrapDraw ? "On (strokes wrap)" : "Off"); break;
+	case 10: snprintf(out, n, "%s", barHidden ? "Hidden (X: frames)" : "Shown"); break;
+	case 11: snprintf(out, n, "%s", inputMap.lefty ? "On (mirrored)" : "Off"); break;
 	}
 }
 
@@ -1868,6 +2020,12 @@ static void update_view(u32 kDown)
 	case 6: for (k = 0; k < 4 && HUD[k] != hudGrid; k++); hudGrid = HUD[(k + 4 + dir) % 4]; break;
 	case 7: for (k = 0; k < 3 && ISO[k] != isoGrid; k++); isoGrid = ISO[(k + 3 + dir) % 3]; break;
 	case 8: for (k = 0; k < 3 && AUTO[k] != autosaveMin; k++); autosaveMin = AUTO[(k + 3 + dir) % 3]; break;
+	case 9: wrapDraw = !wrapDraw; break;
+	case 10: barHidden = !barHidden; view_clamp(); break;
+	case 11:
+		inputMap.lefty = !inputMap.lefty;
+		set_status(inputMap.lefty ? "While drawing: D-pad and A/B/X/Y swap, L and R swap" : "Buttons back to right-handed");
+		break;
 	}
 }
 
@@ -1907,24 +2065,48 @@ static void update_more_menus(u32 kDown, u32 kHeld, touchPosition touch)
 	case MODE_IMPORT:
 		list_nav(kDown, &importSel, importCount);
 		if (kDown & KEY_B) mode = MODE_MENU;
-		if ((kDown & KEY_A) && importCount) { importAsSel = 0; mode = MODE_IMPORT_AS; }
+		if ((kDown & KEY_A) && importCount)
+		{
+			if (import_has_ext(".hex") || import_has_ext(".gpl")) { mode = MODE_DRAW; import_palette_file(); }
+			else if (import_has_ext(".gif"))
+			{
+				mode = MODE_DRAW;
+				importHow = IMP_GIF;
+				if (doc.dirty) confirm(ACT_IMPORT_PROJECT, "Discard unsaved changes?");
+				else import_as(IMP_GIF);
+			}
+			else { importAsSel = 0; mode = MODE_IMPORT_AS; }
+		}
 		break;
 	case MODE_IMPORT_AS:
-		list_nav(kDown, &importAsSel, 4);
+		list_nav(kDown, &importAsSel, IMPORT_AS_COUNT);
 		if (kDown & KEY_B) mode = MODE_IMPORT;
 		if (kDown & KEY_A)
 		{
+			if (importAsSel == IMP_SHEET)
+			{
+				// how the sheet is cut up: frames across and down
+				int c = ask_number("Frames across (1-64)", importCols, DOC_MAX_FRAMES);
+				int r = c ? ask_number("Rows of frames (1-64)", importRows, DOC_MAX_FRAMES) : 0;
+				if (!c || !r) break;
+				if (c * r > DOC_MAX_FRAMES) { set_status("64 frames at most"); break; }
+				importCols = c;
+				importRows = r;
+			}
 			mode = MODE_DRAW;
-			if (importAsSel == 0 && doc.dirty) confirm(ACT_IMPORT_PROJECT, "Discard unsaved changes?");
+			importHow = importAsSel;
+			bool replaces = importAsSel == IMP_PROJECT || importAsSel == IMP_SHEET;
+			if (replaces && doc.dirty) confirm(ACT_IMPORT_PROJECT, "Discard unsaved changes?");
 			else import_as(importAsSel);
 		}
 		break;
 	case MODE_COLORS:
-		list_nav(kDown, &colorsSel, 2);
+		list_nav(kDown, &colorsSel, COLORS_COUNT);
 		if (kDown & KEY_B) mode = MODE_MENU;
 		if (kDown & KEY_A)
 		{
-			if (colorsSel == 0)
+			if (colorsSel == 2) { export_palette(); mode = MODE_DRAW; }
+			else if (colorsSel == 0)
 			{
 				if (curSwatch < 0) { set_status("Tap the start swatch first, then Colors > Color ramp"); mode = MODE_DRAW; }
 				else mode = MODE_RAMP;
@@ -1956,7 +2138,7 @@ static void update_more_menus(u32 kDown, u32 kHeld, touchPosition touch)
 
 // ---- frames (animation) ----------------------------------------------------------------
 
-static bool bar_shown(void) { return doc.frameCount > 1 && mode == MODE_DRAW; }
+static bool bar_shown(void) { return doc.frameCount > 1 && mode == MODE_DRAW && !barHidden; }
 
 static void play_restart(void)
 {
@@ -2002,7 +2184,7 @@ static void update_anim(void)
 static void set_frame(int f)
 {
 	if (f < 0 || f >= doc.frameCount || f == doc.curFrame) return;
-	finish_floating();
+	finish_pending();
 	doc.curFrame = f;
 	layerThumbsDirty = true;
 	after_doc_change();
@@ -2012,7 +2194,7 @@ static void frame_thumbs_reset(void) { memset(frameThumbOk, 0, sizeof(frameThumb
 
 static void open_frames(void)
 {
-	finish_floating();
+	finish_pending();
 	frame_thumbs_reset();
 	mode = MODE_FRAMES;
 }
@@ -2031,7 +2213,7 @@ static bool frame_fits(void)
 static void frame_add(bool copy)
 {
 	if (!frame_fits()) return;
-	finish_floating();
+	finish_pending();
 	hist_begin(&doc);
 	if (doc_frame_insert(&doc, doc.curFrame + 1, copy ? doc.curFrame : -1)) { hist_commit(); doc.dirty = true; }
 	else { hist_abort(); set_status("Out of memory"); }
@@ -2061,6 +2243,8 @@ static void frame_act_label(int a, char* out, size_t n)
 	case FA_DEL: snprintf(out, n, "Delete frame"); break;
 	case FA_LINK: snprintf(out, n, "Link layer's cel to previous frame"); break;
 	case FA_UNLINK: snprintf(out, n, "Unlink layer's cel"); break;
+	case FA_COPYNEXT: snprintf(out, n, "Copy layer's cel to the next frame"); break;
+	case FA_CLEAR: snprintf(out, n, "Clear layer's cel"); break;
 	case FA_MS: snprintf(out, n, "Frame duration... (%d ms)", doc_frame_ms(&doc, doc.curFrame)); break;
 	case FA_FPS: snprintf(out, n, "All frames: set FPS..."); break;
 	case FA_TAGNEW: snprintf(out, n, "New tag starting here"); break;
@@ -2073,6 +2257,7 @@ static void frame_act_label(int a, char* out, size_t n)
 		if (playTag >= 0 && playTag < doc.tagCount) snprintf(out, n, "Play: tag \"%s\"", doc.tags[playTag].name);
 		else snprintf(out, n, "Play: all frames");
 		break;
+	case FA_BIGVIEW: snprintf(out, n, "Large preview: %s", bigPreview ? "On" : "Off"); break;
 	}
 }
 
@@ -2087,7 +2272,7 @@ static void run_frame_action(int a)
 	case FA_DUP: frame_add(true); break;
 	case FA_DEL:
 		if (doc.frameCount < 2) { set_status("Can't delete the last frame"); break; }
-		finish_floating();
+		finish_pending();
 		hist_begin(&doc);
 		if (doc_frame_delete(&doc, f)) { hist_commit(); doc.dirty = true; } else hist_abort();
 		frame_thumbs_reset();
@@ -2095,7 +2280,7 @@ static void run_frame_action(int a)
 	case FA_LINK:
 	case FA_UNLINK:
 	{
-		finish_floating();
+		finish_pending();
 		hist_begin(&doc);
 		bool ok = a == FA_LINK ? doc_cel_link_prev(&doc, doc.curLayer, f) : doc_cel_unlink(&doc, doc.curLayer, f);
 		if (ok) { hist_commit(); doc.dirty = true; frame_thumbs_reset(); }
@@ -2107,10 +2292,34 @@ static void run_frame_action(int a)
 		}
 		break;
 	}
+	case FA_COPYNEXT:
+	{
+		// the drawing on this layer goes onto the next frame (a new one at the end), and you follow it
+		bool last = f + 1 >= doc.frameCount;
+		if (last && !frame_fits()) break;
+		if (!last && doc_layer_locked(&doc, doc.curLayer)) { set_status("Layer is locked (Y: layers)"); break; }
+		finish_pending();
+		hist_begin(&doc);
+		bool ok = !last || doc_frame_insert(&doc, f + 1, -1);
+		ok = ok && doc_cel_copy_next(&doc, doc.curLayer, f);
+		if (ok) { hist_commit(); doc.curFrame = f + 1; doc.dirty = true; set_status("Copied to the next frame"); }
+		else { if (last && doc.frameCount > f + 1) doc_frame_delete(&doc, f + 1); doc.curFrame = f; hist_abort(); set_status("Out of memory"); }
+		frame_thumbs_reset();
+		break;
+	}
+	case FA_CLEAR:
+		if (!layer_editable()) break;
+		finish_pending();
+		hist_begin_cel(&doc);
+		memset(doc_pixels(&doc), 0, (size_t)doc.w * doc.h);   // a linked cel clears in every frame that shares it
+		hist_commit();
+		doc.dirty = true;
+		frame_thumbs_reset();
+		break;
 	case FA_MS:
 	{
 		int ms = ask_number("Frame duration in ms (10-9999)", doc_frame_ms(&doc, f), 9999);
-		if (ms) { doc.frameMs[f] = ms < 10 ? 10 : ms; doc.dirty = true; }
+		if (ms) { hist_push_meta(&doc, 0); doc.frameMs[f] = ms < 10 ? 10 : ms; doc.dirty = true; }
 		break;
 	}
 	case FA_FPS:
@@ -2118,6 +2327,7 @@ static void run_frame_action(int a)
 		int fps = ask_number("Frames per second (1-50)", doc.fps ? doc.fps : 8, 50);
 		if (fps)
 		{
+			hist_push_meta(&doc, 0);
 			doc.fps = fps;
 			for (int i = 0; i < DOC_MAX_FRAMES; i++) doc.frameMs[i] = 0;   // 0 = use the FPS
 			doc.dirty = true;
@@ -2126,6 +2336,7 @@ static void run_frame_action(int a)
 	}
 	case FA_TAGNEW:
 		if (doc.tagCount >= DOC_MAX_TAGS) { set_status("16 tags max"); break; }
+		hist_push_meta(&doc, 0);
 		t = doc.tagCount++;
 		memset(&doc.tags[t], 0, sizeof(Tag));
 		snprintf(doc.tags[t].name, TAG_NAME_MAX, "tag %d", t + 1);
@@ -2145,18 +2356,25 @@ static void run_frame_action(int a)
 			if (a == FA_TAGSTART && T->to >= f && (best < 0 || T->to < doc.tags[best].to)) best = k;
 		}
 		if (best < 0) { set_status(a == FA_TAGEND ? "No tag starts before this frame" : "No tag ends after this frame"); break; }
+		hist_push_meta(&doc, 0);
 		if (a == FA_TAGEND) doc.tags[best].to = (uint8_t)f; else doc.tags[best].from = (uint8_t)f;
 		doc.dirty = true;
 		break;
 	}
-	case FA_TAGDIR: doc.tags[t].dir = (doc.tags[t].dir + 1) % TAG_DIR_COUNT; doc.dirty = true; break;
+	case FA_TAGDIR: hist_push_meta(&doc, 0x300 + t); doc.tags[t].dir = (doc.tags[t].dir + 1) % TAG_DIR_COUNT; doc.dirty = true; break;
 	case FA_TAGNAME:
 	{
 		char nm[DOC_NAME_MAX];
-		if (ask_text("Tag name", doc.tags[t].name, nm, TAG_NAME_MAX)) { snprintf(doc.tags[t].name, TAG_NAME_MAX, "%.15s", nm); doc.dirty = true; }
+		if (ask_text("Tag name", doc.tags[t].name, nm, TAG_NAME_MAX))
+		{
+			hist_push_meta(&doc, 0);
+			snprintf(doc.tags[t].name, TAG_NAME_MAX, "%.15s", nm);
+			doc.dirty = true;
+		}
 		break;
 	}
 	case FA_TAGDEL:
+		hist_push_meta(&doc, 0);
 		memmove(&doc.tags[t], &doc.tags[t + 1], sizeof(Tag) * (doc.tagCount - t - 1));
 		doc.tagCount--;
 		if (playTag == t) playTag = -1;
@@ -2166,6 +2384,10 @@ static void run_frame_action(int a)
 	case FA_PLAYTAG:
 		// cycle: all frames, then each tag
 		playTag = playTag + 1 >= doc.tagCount ? -1 : playTag + 1;
+		break;
+	case FA_BIGVIEW:
+		bigPreview = !bigPreview;
+		if (bigPreview) set_status("Large preview on (A > Large preview to switch back)");
 		break;
 	}
 	layerThumbsDirty = true;
@@ -2181,6 +2403,7 @@ static void update_frames(u32 kDown)
 	if (rep & (KEY_DUP | KEY_DDOWN))
 	{
 		int ms = doc_frame_ms(&doc, doc.curFrame) + ((rep & KEY_DUP) ? 10 : -10);
+		hist_push_meta(&doc, 0x200 + doc.curFrame);   // holding the button is one undo step
 		doc.frameMs[doc.curFrame] = ms < 10 ? 10 : ms > 9990 ? 9990 : ms;
 		doc.dirty = true;
 		playN = 0;
@@ -2241,6 +2464,23 @@ static const u32 TAG_COLORS[4] = { 0xFF28AAFF, 0xFFD25AFF, 0xFF64DC78, 0xFFF0B43
 
 static void draw_frames_panel(void)
 {
+	if (bigPreview && mode == MODE_FRAMES)
+	{
+		// large preview: the animation as big as the top screen allows, one line of info below
+		C2D_DrawRectSolid(0, 0, 0.5f, 400, 240, C_BG_BOT);
+		float bw = 400, bh = 222, s = 1;
+		while (doc.w * (s + 1) <= bw && doc.h * (s + 1) <= bh) s += 1;     // whole-number scales stay crisp
+		while (doc.w * s > bw || doc.h * s > bh) s /= 2;
+		float px = floorf((bw - doc.w * s) / 2), py = floorf((bh - doc.h * s) / 2);
+		if (anim_playing()) gfx_draw_play(&doc, px, py, s, flipPreview);
+		else gfx_draw_canvas_ex(&doc, px, py, s, flipPreview);
+		C2D_DrawRectSolid(0, 224, 0.5f, 400, 16, C_PANEL);
+		int shown = anim_playing() ? playShown : doc.curFrame;
+		if (statusTimer > 0) gfx_text(6, 225, 0.42f, C_ACCENT, "%s", status);
+		else gfx_text(6, 225, 0.42f, playOn ? C_ACCENT : C_DIM, "Frame %d/%d  %d ms  %s   SELECT play  </> frame  A actions  B close",
+		              shown + 1, doc.frameCount, doc_frame_ms(&doc, shown), playOn ? "playing" : "stopped");
+		return;
+	}
 	C2D_DrawRectSolid(0, 0, 0.5f, 400, 240, C_PANEL);
 	gfx_text(8, 4, 0.52f, C_TEXT, "Frames");
 	gfx_text(64, 6, 0.38f, C_DIM, "</> frame  Up/Down time  L/R move  Y add  A actions  SELECT play  B close");
@@ -2295,7 +2535,8 @@ static void draw_frames_panel(void)
 	if (t >= 0)
 		gfx_text(12, iy + 44, 0.42f, C_DIM, "Tag \"%s\" %d-%d, %s", doc.tags[t].name, doc.tags[t].from + 1, doc.tags[t].to + 1,
 		         DIR_NAMES[doc.tags[t].dir % TAG_DIR_COUNT]);
-	gfx_text(12, iy + 58, 0.42f, C_DIM, "Onion skin: %s (touch bar or View)", onionOn ? "on" : "off");
+	gfx_text(12, iy + 58, 0.42f, C_DIM, "Onion skin: %s   Memory: %.1f of %d MB", onionOn ? "on" : "off",
+	         doc_pixel_bytes(&doc) / 1048576.0f, (int)(PIXEL_BUDGET >> 20));
 	char pl[48];
 	frame_act_label(FA_PLAYTAG, pl, sizeof(pl));
 	gfx_text(12, iy + 72, 0.42f, playOn ? C_ACCENT : C_DIM, "%s%s", pl, playOn ? "  (playing)" : "  (SELECT)");
@@ -2313,7 +2554,7 @@ static void draw_frames_panel(void)
 
 	if (mode == MODE_FRAME_ACT)
 	{
-		float ax = 120, ay = 16, aw = 272, ah = 220, rh = 14.5f;
+		float ax = 120, ay = 4, aw = 272, ah = 232, rh = 13.4f;
 		C2D_DrawRectSolid(ax, ay, 0.5f, aw, ah, COL(0x24, 0x27, 0x30));
 		gfx_rect_outline(ax, ay, aw, ah, 1, C_DIM);
 		for (int a = 0; a < FA_COUNT; a++)
@@ -2323,7 +2564,7 @@ static void draw_frames_panel(void)
 			char lab[64];
 			frame_act_label(a, lab, sizeof(lab));
 			gfx_text(ax + 10, y, 0.42f, a == frameActSel ? C_ACCENT : C_TEXT, "%s", lab);
-			if (a == FA_UNLINK || a == FA_FPS || a == FA_TAGDEL)
+			if (a == FA_CLEAR || a == FA_FPS || a == FA_TAGDEL)
 				C2D_DrawRectSolid(ax + 6, y + rh - 1, 0.5f, aw - 12, 1, C_PANEL);
 		}
 	}
@@ -2374,6 +2615,7 @@ static bool logoReady;
 
 static GalItem gal[GFX_THUMB_SLOTS - 1];
 static int galCount, galSel, homeTab = 1, homeNewSel;
+static int galSkipped;                  // projects that didn't fit in the list
 static float galScroll;                 // pixels scrolled in the gallery grid
 static bool homeFromCanvas;             // B goes back to the open canvas
 static int homeTouch;                   // 0 none, 1 tile tap, 2 scrolling
@@ -2404,10 +2646,12 @@ static void scan_gallery(void)
 	if (dir)
 	{
 		struct dirent* e;
-		while ((e = readdir(dir)) && galCount < GFX_THUMB_SLOTS - 1)
+		galSkipped = 0;
+		while ((e = readdir(dir)))
 		{
 			size_t n = strlen(e->d_name);
 			if (n <= 4 || n - 4 >= DOC_NAME_MAX || strcasecmp(e->d_name + n - 4, ".pxd")) continue;
+			if (galCount >= GFX_THUMB_SLOTS - 1) { galSkipped++; continue; }
 			GalItem* g = &gal[galCount++];
 			memset(g, 0, sizeof(*g));
 			memcpy(g->name, e->d_name, n - 4);
@@ -2450,7 +2694,7 @@ static void gallery_load_some(void)
 
 static void open_home(bool fromCanvas)
 {
-	finish_floating();
+	finish_pending();
 	homeFromCanvas = fromCanvas;
 	scan_gallery();
 	if (galCount == 0) homeTab = 0;
@@ -2777,6 +3021,8 @@ static void draw_home_top(void)
 		gfx_draw_thumb(galSel, g->tw, g->th, bx + (bw - g->tw * sc) / 2, by + (bh - g->th * sc) / 2, sc);
 	}
 	gfx_text(16, 140, 0.42f, C_DIM, "%d of %d", galSel + 1, galCount);
+	if (galSkipped)
+		gfx_text(16, 156, 0.4f, C_ACCENT, "%d more not shown\n(the list holds %d)", galSkipped, galCount);
 	gfx_text(16, 222, 0.42f, C_DIM, "A: open  X: delete  Y: rename  L/R: New tab%s", homeFromCanvas ? "  B: back" : "");
 }
 
@@ -2814,7 +3060,7 @@ static void update_shift(u32 kDown, u32 kHeld, touchPosition touch)
 
 static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 {
-	if ((kDown & KEY_START) && touchTarget == TOUCH_NONE) { curve_finish(); finish_floating(); mode = MODE_MENU; menuSel = 0; return; }
+	if ((kDown & KEY_START) && touchTarget == TOUCH_NONE) { finish_pending(); mode = MODE_MENU; menuSel = 0; return; }
 	if ((kDown & KEY_A) && touchTarget == TOUCH_NONE)
 	{
 		if (tool == TOOL_STAMP) refresh_stamps();
@@ -2899,7 +3145,8 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	}
 
 	circlePosition cp;
-	hidCircleRead(&cp);
+	if (inputMap.lefty && isNew3DS) hidCstickRead(&cp);   // the right thumb pans when the left hand draws
+	else hidCircleRead(&cp);
 	if (abs(cp.dx) > 16 || abs(cp.dy) > 16)
 	{
 		const float speed = 5.0f / 156.0f;
@@ -3109,6 +3356,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				if (kHeld & KEY_R)
 				{
 					// R + tap a swatch: save the current color into it
+					hist_push_meta(&doc, 0);
 					doc.swatches[slot] = curColor;
 					curSwatch = slot;
 					doc.dirty = true;
@@ -3162,6 +3410,9 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				shapeEndY = startCY;
 				hist_begin_cel(&doc);             // strokes only touch this layer's current frame
 				tools_set_mirror_axis(mirrorAX2, mirrorAY2);
+				tools_set_wrap(wrapDraw);
+				strokeLastCX = cx;
+				strokeLastCY = cy;
 				tools_begin(&doc, mirrorOn ? mirrorMode : MIRROR_OFF);
 				tools_set_clip(sel_active() ? sel_contains : NULL);   // paint inside the selection only
 				strokeActive = true;
@@ -3179,6 +3430,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 	if ((kHeld & KEY_TOUCH) && touchTarget == TOUCH_CANVAS)
 	{
 		int cx, cy;
+		bool partial = false;                    // only a small part of the canvas texture needed redoing
 		screen_to_canvas(touch.px, touch.py, &cx, &cy);
 		if (curveBend)
 		{
@@ -3189,7 +3441,20 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 		else if (dropper && !strokeActive)
 			eyedrop(cx, cy);
 		else if (strokeActive && (tool == TOOL_PENCIL || (tool == TOOL_ERASER && !eraserLine) || tool == TOOL_SHADE) && !(kDown & KEY_TOUCH))
+		{
 			tools_stroke_to(cx, cy, value, &brushes[tool]);
+			if (!mirrorOn && !wrapDraw)
+			{
+				// a freehand stroke only changes pixels near the stylus: redraw just that box
+				// instead of compositing every layer of the whole canvas (matters on an Old 3DS)
+				int pad = BRUSH_MAX + 2;
+				gfx_canvas_rebuild_rect(&doc, (cx < strokeLastCX ? cx : strokeLastCX) - pad, (cy < strokeLastCY ? cy : strokeLastCY) - pad,
+				                        (cx > strokeLastCX ? cx : strokeLastCX) + pad, (cy > strokeLastCY ? cy : strokeLastCY) + pad);
+				partial = true;
+			}
+			strokeLastCX = cx;
+			strokeLastCY = cy;
+		}
 		else if (strokeActive && tool == TOOL_FILL && fillMode == FILL_GRADIENT && !(kDown & KEY_TOUCH))
 		{
 			tools_restore();
@@ -3228,7 +3493,7 @@ static void update_draw(u32 kDown, u32 kHeld, u32 kUp, touchPosition touch)
 				}
 			}
 		}
-		if (strokeActive || (kDown & KEY_B))
+		if ((strokeActive && !partial) || (kDown & KEY_B))
 			after_doc_change();
 	}
 	else if ((kDown & KEY_TOUCH) && strokeActive)
@@ -3293,7 +3558,7 @@ static void draw_bottom(void)
 	}
 
 	float z = zoom(), sx = canvas_sx(), sy = canvas_sy();
-	gfx_draw_canvas(&doc, sx, sy, z, VIEW_Y, BOT_H);
+	gfx_draw_canvas(&doc, sx, sy, z, VIEW_Y, VIEW_Y + VIEW_H);
 
 	if (gridOn && z >= 4)
 	{
@@ -3749,8 +4014,8 @@ static void draw_top(void)
 			if (rr == 0) { gfx_text(46, y, 0.48f, c, "Format"); gfx_text(150, y, 0.48f, c, "< %s >", EXF_NAMES[exportFmt]); continue; }
 			if (rr == 1)
 			{
-				gfx_text(46, y, 0.48f, exportFmt == EXF_PNG ? C_DIM : c, "Frames");
-				if (exportFmt == EXF_PNG) gfx_text(150, y, 0.48f, C_DIM, "current frame");
+				gfx_text(46, y, 0.48f, export_one_frame() ? C_DIM : c, "Frames");
+				if (export_one_frame()) gfx_text(150, y, 0.48f, C_DIM, "current frame");
 				else if (exportTag == -2)
 					gfx_text(150, y, 0.48f, c, "< each tag, own files (%d) >", doc.tagCount);
 				else if (exportTag >= 0)
@@ -3764,6 +4029,16 @@ static void draw_top(void)
 				gfx_text(46, y, 0.48f, exportFmt == EXF_SHEET ? c : C_DIM, "Layout");
 				gfx_text(150, y, 0.48f, exportFmt == EXF_SHEET ? c : C_DIM, exportFmt == EXF_SHEET ? "< %s >" : "%s",
 				         exportFmt == EXF_SHEET ? LAYOUT_NAMES[exportLayout] : "sprite sheets only");
+				continue;
+			}
+			if (rr == 3 || rr == 4)
+			{
+				u32 sc = exportFmt == EXF_SHEET ? c : C_DIM;
+				gfx_text(46, y, 0.48f, sc, "%s", rr == 3 ? "Padding" : "Trim");
+				if (exportFmt != EXF_SHEET) gfx_text(150, y, 0.48f, C_DIM, "sprite sheets only");
+				else if (rr == 3 && sheetPad) gfx_text(150, y, 0.48f, sc, "< %d px between frames >", sheetPad);
+				else if (rr == 3) gfx_text(150, y, 0.48f, sc, "< none >");
+				else gfx_text(150, y, 0.48f, sc, "< %s >", sheetTrim ? "On: cut the empty border" : "Off");
 				continue;
 			}
 			if (r == 0)
@@ -3798,6 +4073,7 @@ static void draw_top(void)
 		gfx_rect_outline(16, 4, 368, 232, 1, C_ACCENT);
 		gfx_text(26, 8, 0.52f, C_TEXT, "Layers");
 		gfx_text(86, 10, 0.38f, C_DIM, "A actions  X show/hide  </> opacity  L/R move  B close");
+		gfx_text(306, 222, 0.36f, C_DIM, "%.1f / %d MB", doc_pixel_bytes(&doc) / 1048576.0f, (int)(PIXEL_BUDGET >> 20));
 		int rows[DOC_MAX_LAYERS];
 		int n = layer_rows(rows);
 		for (int k = 0; k < n; k++)
@@ -3854,12 +4130,13 @@ static void draw_top(void)
 	{
 		static const char* labels[64];
 		for (int i = 0; i < importCount; i++) labels[i] = importFiles[i];
-		draw_list("Import PNG", labels, importCount, importSel, "Put PNGs in /3ds/pixel-crow/import");
+		draw_list(importCount == 64 ? "Import (first 64 files)" : "Import", labels, importCount, importSel,
+		          "Put PNG, GIF, .hex or .gpl files in\n/3ds/pixel-crow/import");
 	}
 	else if (mode == MODE_IMPORT_AS)
-		draw_list(importFiles[importSel], IMPORT_AS, 4, importAsSel, "");
+		draw_list(importFiles[importSel], IMPORT_AS, IMPORT_AS_COUNT, importAsSel, "");
 	else if (mode == MODE_COLORS)
-		draw_list("Colors", COLORS_ITEMS, 2, colorsSel, "");
+		draw_list("Colors", COLORS_ITEMS, COLORS_COUNT, colorsSel, "");
 	else if (mode == MODE_RAMP)
 	{
 		C2D_DrawRectSolid(40, 90, 0.5f, 320, 60, C_PANEL);
@@ -3887,19 +4164,19 @@ static void draw_top(void)
 	}
 	else if (mode == MODE_VIEW)
 	{
-		C2D_DrawRectSolid(50, 14, 0.5f, 300, 212, C_PANEL);
-		gfx_rect_outline(50, 14, 300, 212, 1, C_ACCENT);
-		gfx_text(62, 20, 0.52f, C_TEXT, "View");
+		C2D_DrawRectSolid(50, 6, 0.5f, 300, 228, C_PANEL);
+		gfx_rect_outline(50, 6, 300, 228, 1, C_ACCENT);
+		gfx_text(62, 10, 0.52f, C_TEXT, "View & settings");
 		for (int r = 0; r < VIEW_ROWS; r++)
 		{
-			float y = 42 + r * 19;
-			if (r == viewSel) C2D_DrawRectSolid(56, y - 3, 0.5f, 288, 18, C_SEL);
-			gfx_text(66, y, 0.48f, r == viewSel ? C_ACCENT : C_TEXT, "%s", VIEW_LABELS[r]);
+			float y = 30 + r * 15.5f;
+			if (r == viewSel) C2D_DrawRectSolid(56, y - 2, 0.5f, 288, 15, C_SEL);
+			gfx_text(66, y, 0.44f, r == viewSel ? C_ACCENT : C_TEXT, "%s", VIEW_LABELS[r]);
 			char v[32];
 			view_value(r, v, sizeof(v));
-			gfx_text(176, y, 0.48f, C_TEXT, "< %s >", v);
+			gfx_text(176, y, 0.44f, C_TEXT, "< %s >", v);
 		}
-		gfx_text(62, 212, 0.42f, C_DIM, "Up/Down: row   Left/Right: change   A/B: close");
+		gfx_text(62, 219, 0.4f, C_DIM, "Up/Down: row   Left/Right: change   A/B: close   (kept between launches)");
 	}
 	else if (mode == MODE_CONFIRM)
 	{
@@ -3911,6 +4188,84 @@ static void draw_top(void)
 }
 
 // ---- main ----------------------------------------------------------------------------
+
+// ---- settings kept between launches ------------------------------------------------------
+// X(key, variable, lowest, highest). Add new ones at the end; old files stay readable.
+#define SETTINGS_LIST(X) \
+	X("grid", gridOn, 0, 1) \
+	X("onion", onionOn, 0, 1) \
+	X("onion_frames", onionCount, 1, 3) \
+	X("onion_opacity", onionPct, 10, 80) \
+	X("flip_preview", flipPreview, 0, 1) \
+	X("tile_preview", tilePreview, 0, 1) \
+	X("hud_grid", hudGrid, 0, 32) \
+	X("iso_grid", isoGrid, 0, 16) \
+	X("autosave_min", autosaveMin, 0, 5) \
+	X("left_handed", inputMap.lefty, 0, 1) \
+	X("frame_bar_hidden", barHidden, 0, 1) \
+	X("tile_drawing", wrapDraw, 0, 1) \
+	X("export_format", exportFmt, 0, EXF_COUNT - 1) \
+	X("export_layout", exportLayout, 0, SHEET_LAYOUT_COUNT - 1) \
+	X("export_sizes", exportMask, 0, (1 << EXPORT_SIZE_COUNT) - 1) \
+	X("sheet_padding", sheetPad, 0, 8) \
+	X("sheet_trim", sheetTrim, 0, 1) \
+	X("pencil_size", brushes[TOOL_PENCIL].size, 1, BRUSH_MAX) \
+	X("pencil_brush", brushes[TOOL_PENCIL].shape, 0, BRUSH_SHAPE_COUNT - 1) \
+	X("pencil_pixel_perfect", brushes[TOOL_PENCIL].pixelPerfect, 0, 1) \
+	X("eraser_size", brushes[TOOL_ERASER].size, 1, BRUSH_MAX) \
+	X("eraser_brush", brushes[TOOL_ERASER].shape, 0, BRUSH_SHAPE_COUNT - 1) \
+	X("eraser_line", eraserLine, 0, 1) \
+	X("shade_size", brushes[TOOL_SHADE].size, 1, BRUSH_MAX) \
+	X("shade_brush", brushes[TOOL_SHADE].shape, 0, BRUSH_SHAPE_COUNT - 1) \
+	X("shade_brightness", shadeBrightness, 0, 1) \
+	X("line_size", brushes[TOOL_LINE].size, 1, BRUSH_MAX) \
+	X("line_brush", brushes[TOOL_LINE].shape, 0, 1) \
+	X("line_curve", lineCurve, 0, 1) \
+	X("rect_size", brushes[TOOL_RECT].size, 1, BRUSH_MAX) \
+	X("rect_filled", shapeFilled[TOOL_RECT], 0, 1) \
+	X("ellipse_size", brushes[TOOL_ELLIPSE].size, 1, BRUSH_MAX) \
+	X("ellipse_filled", shapeFilled[TOOL_ELLIPSE], 0, 1) \
+	X("fill_mode", fillMode, 0, FILL_MODE_COUNT - 1) \
+	X("select_mode", selMode, 0, SELMODE_COUNT - 1) \
+	X("wand_all", wandAll, 0, 1) \
+	X("wand_tolerance", wandTol, 0, 100) \
+	X("wand_sample_all", wandSampleAll, 0, 1) \
+	X("mirror_axis", mirrorMode, MIRROR_X, MIRROR_XY) \
+	X("transform_crisp", tfCrisp, 0, 1) \
+	X("text_crisp", textCrisp, 0, 1) \
+	X("text_font", textFont, 0, FONT_COUNT - 1) \
+	X("text_spacing", textSpacing, -1, 4) \
+	X("frames_large_preview", bigPreview, 0, 1)
+#define SETTINGS_MAX 64
+
+static char settingsSaved[2048];   // the file's contents, to save only when something changed
+
+// load = read the file into the variables; otherwise write it if anything differs.
+static void settings_sync(bool load)
+{
+	int vals[SETTINGS_MAX], n = 0, exportMask = 0;
+	Setting items[SETTINGS_MAX];
+	for (int i = 0; i < EXPORT_SIZE_COUNT; i++) exportMask |= exportOn[i] << i;
+#define X(key, var, lo, hi) vals[n] = (int)(var); items[n] = (Setting){ key, &vals[n], lo, hi }; n++;
+	SETTINGS_LIST(X)
+#undef X
+	if (load)
+	{
+		if (!settings_load(SETTINGS_PATH, items, n)) return;
+		n = 0;
+#define X(key, var, lo, hi) var = vals[n++];
+		SETTINGS_LIST(X)
+#undef X
+		for (int i = 0; i < EXPORT_SIZE_COUNT; i++) exportOn[i] = (exportMask >> i) & 1;
+		settings_format(items, n, settingsSaved, sizeof(settingsSaved));
+		return;
+	}
+	char now[sizeof(settingsSaved)];
+	settings_format(items, n, now, sizeof(now));
+	if (!strcmp(now, settingsSaved)) return;
+	ensure_dirs();
+	if (settings_save(SETTINGS_PATH, items, n)) memcpy(settingsSaved, now, sizeof(now));
+}
 
 int main(int argc, char* argv[])
 {
@@ -3932,11 +4287,17 @@ int main(int argc, char* argv[])
 			rename(OLD_SAVE_ROOT, SAVE_ROOT);
 	}
 	hidSetRepeatParameters(24, 5);   // held D-pad repeats (frames panel)
+	export_recommended();
+	settings_sync(true);
+	// Old 3DS / 2DS have no ZL and ZR: SELECT (held) and R + L stand in for them
+	APT_CheckNew3DS(&isNew3DS);
+	inputMap.old3ds = !isNew3DS;
 	view_fit();
 	after_doc_change();
-	export_recommended();
 	curColor = doc.swatches[0];
-	if (file_exists(AUTOSAVE_PATH))
+	if (!isNew3DS) set_status("Old 3DS (untested!): hold SELECT for ZR, R + L to redo");
+	bool hadAutosave = file_exists(AUTOSAVE_PATH);
+	if (hadAutosave)
 	{
 		// Left over from a crash or power-off: turn it into a normal project right away, so
 		// starting something new, opening another project or exiting can't delete it.
@@ -3966,7 +4327,13 @@ int main(int argc, char* argv[])
 		hidTouchRead(&touch);
 
 		if (mode == MODE_DRAW)
+		{
+			// left-handed layout and Old 3DS stand-ins apply while drawing; menus keep the labels they show
+			uint32_t dn = kDown, hl = kHeld, rel = kUp;
+			input_map(&inputMap, &dn, &hl, &rel);
+			kDown = dn; kHeld = hl; kUp = rel;
 			update_draw(kDown, kHeld, kUp, touch);
+		}
 		else if (mode == MODE_PICKER)
 		{
 			PickResult r = picker_update(kDown, kHeld, touch);
@@ -3976,12 +4343,16 @@ int main(int argc, char* argv[])
 				{
 					uint32_t cols[DOC_PALETTE_SIZE];
 					int n = picker_list(cols);
+					// one undo step either way: the whole document if pixels are recolored too
+					bool recolored = false;
 					if (doc.linkedSwatches)
 					{
 						hist_begin(&doc);
-						if (doc_recolor(&doc, doc.swatches, cols, n)) { hist_commit(); after_doc_change(); }
+						recolored = doc_recolor(&doc, doc.swatches, cols, n);
+						if (recolored) { hist_commit(); after_doc_change(); }
 						else hist_abort();
 					}
+					if (!recolored) hist_push_meta(&doc, 0);
 					memcpy(doc.swatches, cols, n * sizeof(uint32_t));
 					if (curSwatch >= 0 && curSwatch < n)
 						curColor = doc.swatches[curSwatch];
@@ -3996,12 +4367,15 @@ int main(int argc, char* argv[])
 					curColor = picker_color();
 					if (curSwatch >= 0 && doc.swatches[curSwatch] != curColor)
 					{
+						bool recolored = false;
 						if (doc.linkedSwatches)
 						{
 							hist_begin(&doc);
-							if (doc_recolor(&doc, &doc.swatches[curSwatch], &curColor, 1)) { hist_commit(); after_doc_change(); }
+							recolored = doc_recolor(&doc, &doc.swatches[curSwatch], &curColor, 1);
+							if (recolored) { hist_commit(); after_doc_change(); }
 							else hist_abort();
 						}
+						if (!recolored) hist_push_meta(&doc, 0);
 						doc.swatches[curSwatch] = curColor;
 						doc.dirty = true;
 					}
@@ -4055,6 +4429,10 @@ int main(int argc, char* argv[])
 		}
 		else if (!doc.dirty)
 			autosaveFrames = 0;
+		// remember changed settings (checked about once a second, written only when different)
+		static unsigned settingsTick;
+		if (++settingsTick % 64 == 0 && touchTarget == TOUCH_NONE && (mode == MODE_DRAW || mode == MODE_HOME))
+			settings_sync(false);
 		if (mode != MODE_HOME) update_anim();
 		gfx_canvas_flush();
 
@@ -4072,6 +4450,7 @@ int main(int argc, char* argv[])
 		C3D_FrameEnd(0);
 	}
 
+	settings_sync(false);
 	doc_free(&doc);
 	hist_clear();
 	gfx_fini();

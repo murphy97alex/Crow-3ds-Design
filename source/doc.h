@@ -105,6 +105,9 @@ void doc_set_current_layer(Doc* d, int i);            // ignores folders
 
 // Composite visible layers of a frame into RGBA (0xRRGGBBAA, straight alpha).
 void doc_composite(const Doc* d, int frame, uint32_t* out);
+// Same, but only refreshes the pixels of rectangle x0..x1, y0..y1 (inclusive, clamped) inside the
+// full-canvas buffer `out`. Cheap way to follow a brush stroke.
+void doc_composite_rect(const Doc* d, int frame, uint32_t* out, int x0, int y0, int x1, int y1);
 
 // ---- frames ---------------------------------------------------------------------
 
@@ -113,11 +116,15 @@ size_t doc_pixel_bytes(const Doc* d);                   // memory used by all pi
 // Insert a frame at index `at`: blank (copyFrom < 0) or a copy of frame copyFrom. Becomes current.
 bool doc_frame_insert(Doc* d, int at, int copyFrom);
 bool doc_frame_delete(Doc* d, int f);                   // keeps at least one frame
-bool doc_frame_move(Doc* d, int f, int dir);            // swap with the neighbour (-1 / +1)
+// Swap with the neighbour (-1 / +1). A tag that covers only that one frame moves with it.
+bool doc_frame_move(Doc* d, int f, int dir);
 // Linked cels: frame f of layer li shows the same drawing as frame f-1 (editing one edits both).
 bool doc_cel_link_prev(Doc* d, int li, int f);
 bool doc_cel_unlink(Doc* d, int li, int f);             // give frame f its own copy
 bool doc_cel_linked(const Doc* d, int li, int f);       // shared with any other frame?
+// Copy layer li's drawing in frame f over the same layer in frame f + 1 (which gets its own
+// buffer if it was linked elsewhere). False if there is no next frame or no memory.
+bool doc_cel_copy_next(Doc* d, int li, int f);
 
 // ---- canvas ---------------------------------------------------------------------
 
@@ -126,13 +133,18 @@ bool doc_resize(Doc* d, int w, int h, int ax, int ay);
 bool doc_crop(Doc* d, int x, int y, int w, int h);
 
 // ---- undo -----------------------------------------------------------------------
-// Snapshots cover the whole document (pixels, layers, color table, size); swatches excluded.
+// Snapshots cover the whole document (pixels, layers, color table, size, swatches), one cel,
+// or just the settings that aren't pixels ("meta": swatches, tags, frame times, layer
+// name / visibility / lock / opacity).
 void hist_clear(void);
 void hist_push(const Doc* d);     // call before an edit; clears redo
 // For strokes: snapshot at stroke start, commit only if something changed.
 void hist_begin(const Doc* d);
 // Cheaper snapshot for edits that only touch the current layer's current cel (strokes, moves).
 void hist_begin_cel(const Doc* d);
+// One undo step for a settings change; call before changing. Changes with the same non-zero
+// key that follow each other (holding a button to change an opacity) share one step.
+void hist_push_meta(const Doc* d, int key);
 void hist_commit(void);
 void hist_abort(void);
 bool hist_undo(Doc* d);

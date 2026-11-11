@@ -118,7 +118,7 @@ int main(void)
 	assert(c == 3 && r == 2);
 
 	// sprite sheet: 3 frames in a row at 2x
-	assert(!anim_export_sheet(&d, -1, SHEET_ROW, 2, "/tmp/pc_sheet.png"));
+	assert(!anim_export_sheet(&d, -1, &(SheetOpts){ SHEET_ROW, 2, 0, false }, "/tmp/pc_sheet.png"));
 	uint32_t* img; int w, h; bool shrunk;
 	assert(!import_read_png("/tmp/pc_sheet.png", 4096, 4096, &img, &w, &h, &shrunk));
 	assert(w == 30 && h == 6);
@@ -127,15 +127,15 @@ int main(void)
 	assert(img[20 + 4] == 0xFF0000FF && img[30 + 25] == 0xFF0000FF);           // frame 2, pixel 2 (row 1 too)
 	free(img);
 	// grid of the reverse tag (2 frames -> 2x1), column layout
-	assert(!anim_export_sheet(&d, 1, SHEET_COLUMN, 1, "/tmp/pc_col.png"));
+	assert(!anim_export_sheet(&d, 1, &(SheetOpts){ SHEET_COLUMN, 1, 0, false }, "/tmp/pc_col.png"));
 	assert(!import_read_png("/tmp/pc_col.png", 4096, 4096, &img, &w, &h, &shrunk));
 	assert(w == 5 && h == 6 && img[1] == 0x0000FFFF && img[15 + 2] == 0xFF0000FF);
 	free(img);
-	assert(anim_export_sheet(&d, -1, SHEET_ROW, 200, "/tmp/pc_big.png"));       // too big
+	assert(anim_export_sheet(&d, -1, &(SheetOpts){ SHEET_ROW, 200, 0, false }, "/tmp/pc_big.png"));       // too big
 
 	// JSON data file for a sheet (Aseprite array layout)
 	strcpy(d.name, "hero");
-	assert(!anim_export_sheet_json(&d, -1, SHEET_GRID, 2, "hero_sheet_2x.png", "/tmp/pc_sheet.json"));
+	assert(!anim_export_sheet_json(&d, -1, &(SheetOpts){ SHEET_GRID, 2, 0, false }, "hero_sheet_2x.png", "/tmp/pc_sheet.json"));
 	{
 		FILE* jf = fopen("/tmp/pc_sheet.json", "r");
 		static char js[8192];
@@ -151,7 +151,7 @@ int main(void)
 		assert(strstr(js, "\"image\": \"hero_sheet_2x.png\""));
 	}
 	// only tags inside the range, renumbered
-	assert(!anim_export_sheet_json(&d, 1, SHEET_ROW, 1, "x.png", "/tmp/pc_tag.json"));
+	assert(!anim_export_sheet_json(&d, 1, &(SheetOpts){ SHEET_ROW, 1, 0, false }, "x.png", "/tmp/pc_tag.json"));
 	{
 		FILE* jf = fopen("/tmp/pc_tag.json", "r");
 		static char js[8192];
