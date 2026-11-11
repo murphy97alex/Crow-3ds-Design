@@ -3,7 +3,7 @@
 (Renamed from "3DS Pixel UI Designer" on 2026-11-09.)
 
 Track: Delegated (Claude Code builds, Alex directs from his phone).
-Goal: Homebrew drawing app on Alex's New 3DS XL for sprites and interface visuals for Crow and other robots.
+Goal: Homebrew drawing app (home screen subtitle: "Pixel art, sprites & animation", version shown next to the name) on Alex's New 3DS XL for sprites and interface visuals for Crow and other robots.
 Main use: icons first. UI design (e.g. a HUD for a robot controller) is a plus.
 Workflow rule: Pause and ping Alex for design choices, then continue after he decides.
 Repo: public, MIT. No secrets/keys, only open-licensed fonts/assets, no Nintendo assets. Alex's art stays out of this repo, except the app's own icon and banner (by Alex, CC0).

@@ -23,6 +23,9 @@
 #include "tools.h"
 
 #define APP_NAME "Pixel Crow"
+#ifndef APP_VERSION
+#define APP_VERSION "dev"   // set by the Makefile from APP_VERSION_*
+#endif
 #define SAVE_ROOT "sdmc:/3ds/pixel-crow"
 #define OLD_SAVE_ROOT "sdmc:/3ds/pixel-ui-designer"   // name before the rename
 #define SAVE_DIR SAVE_ROOT "/projects"
@@ -2712,7 +2715,8 @@ static void draw_home_top(void)
 	}
 	gfx_draw_thumb_ex(LOGO_SLOT, APP_ICON_W, APP_ICON_H, 10, 4, 1, false);
 	gfx_text(64, 10, 0.8f, C_ACCENT, APP_NAME);
-	gfx_text(66, 34, 0.42f, C_DIM, "Pixel art & UI for Crow and other robots");
+	gfx_text(66 + gfx_text_width(0.8f, APP_NAME), 20, 0.42f, C_DIM, "v" APP_VERSION);
+	gfx_text(66, 34, 0.42f, C_DIM, "Pixel art, sprites & animation");
 	gfx_text(400 - 8 - gfx_text_width(0.42f, "START: exit"), 14, 0.42f, C_DIM, "START: exit");
 	float bx = 120, by = 60, bw = 260, bh = 150;
 	C2D_DrawRectSolid(bx, by, 0.5f, bw, bh, C_BG_BOT);
@@ -2747,7 +2751,7 @@ static void draw_home_top(void)
 		if (sc >= 1) sc = floorf(sc);
 		gfx_draw_thumb(galSel, g->tw, g->th, bx + (bw - g->tw * sc) / 2, by + (bh - g->th * sc) / 2, sc);
 	}
-	gfx_text(16, 124, 0.42f, C_DIM, "%d of %d", galSel + 1, galCount);
+	gfx_text(16, 140, 0.42f, C_DIM, "%d of %d", galSel + 1, galCount);
 	gfx_text(16, 222, 0.42f, C_DIM, "A: open  X: delete  Y: rename  L/R: New tab%s", homeFromCanvas ? "  B: back" : "");
 }
 
